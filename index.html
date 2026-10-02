@@ -3744,16 +3744,40 @@ function Dashboard({go}){
   // Soldes — filtrés par périmètre de navigation
   const {cash:cashBal, bank:bankBal} = computeBalances(db);
   const totalCaisse = (() => {
-    if(nav.level==="holding") return groupTreasury(db);
-    return navAnnexes.reduce((tot,aid)=>{
-      return tot+(cashBal[cashKeyOf("annexe",aid)]||0);
+    // Somme uniquement les caisses des annexes dans le périmètre de navigation
+    let t = navAnnexes.reduce((tot,aid)=>{
+      let v = cashBal[cashKeyOf("annexe",aid)]||0;
+      // Ajouter les succursales rattachées à cette annexe
+      (db.succursales||[]).filter(s=>s.annexeId===aid).forEach(s=>{
+        v += cashBal[cashKeyOf("succursale",s.id)]||0;
+        v += cashBal[cashKeyOf("annexe",s.id)]||0; // ancienne clé migée
+      });
+      return tot+v;
     },0);
+    // Si le périmètre inclut le niveau subsidiary/holding, ajouter leurs caisses propres
+    if(nav.level==="holding") t += cashBal[cashKeyOf("holding",null)]||0;
+    navSubs.forEach(sid=>{ t += cashBal[cashKeyOf("subsidiary",sid)]||0; });
+    return t;
   })();
   const totalBanque = (() => {
-    if(nav.level==="holding") return Object.values(bankBal||{}).reduce((s,v)=>s+v,0);
-    return navSubs.reduce((tot,sid)=>{
-      return tot+(bankBal[cashKeyOf("subsidiary",sid)]||0);
+    // Banque des annexes dans le périmètre exact de navigation
+    let t = navAnnexes.reduce((tot,aid)=>{
+      let v = bankBal[cashKeyOf("annexe",aid)]||0;
+      (db.succursales||[]).filter(s=>s.annexeId===aid).forEach(s=>{
+        v += bankBal[cashKeyOf("succursale",s.id)]||0;
+        v += bankBal[cashKeyOf("annexe",s.id)]||0;
+      });
+      return tot+v;
     },0);
+    // Banque propre de la subsidiary uniquement si on est au niveau subsidiary ou holding
+    if(nav.level==="holding"){
+      t += bankBal[cashKeyOf("holding",null)]||0;
+      navSubs.forEach(sid=>{ t += bankBal[cashKeyOf("subsidiary",sid)]||0; });
+    } else if(nav.level==="subsidiary"){
+      t += bankBal[cashKeyOf("subsidiary",nav.id)]||0;
+    }
+    // niveau annexe ou succursale : on n'ajoute PAS la banque du groupe entier
+    return t;
   })();
 
   // Top 3 vendeurs du mois
