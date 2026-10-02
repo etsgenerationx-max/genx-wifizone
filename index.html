@@ -220,6 +220,10 @@ tbody tr:hover{background:#fbfaf7}
 .field input:focus,.field select:focus,.field textarea:focus{outline:2px solid rgba(14,124,102,.25);border-color:var(--brand)}
 .modal-bg{position:fixed;inset:0;background:rgba(11,26,42,.45);display:grid;place-items:center;z-index:100;padding:20px}
 .modal{background:var(--surface);border-radius:16px;width:100%;max-width:520px;max-height:90vh;overflow-y:auto;box-shadow:0 24px 70px rgba(0,0,0,.3)}
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:1000;display:flex;align-items:center;justify-content:center;padding:16px}
+.modal-box{background:var(--surface);border-radius:16px;width:100%;max-height:90vh;overflow-y:auto;box-shadow:0 24px 70px rgba(0,0,0,.3)}
+.modal-header{padding:18px 20px;display:flex;justify-content:space-between;align-items:flex-start}
+.modal-footer{padding:14px 20px;display:flex;justify-content:flex-end;gap:10px}
 .modal-head{padding:18px 20px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center}
 .modal-head h3{margin:0;font-size:17px}
 .modal-body{padding:20px}
@@ -933,7 +937,7 @@ async function saveDiff(prev, next){
       }
       return !stableRowEq(b,r);
     });
-    if(changed.length){ const { error } = await sb.from(table).upsert(changed.map(appToRow)); if(error) console.error("upsert "+table, error); }
+    if(changed.length){ const { error } = await sb.from(table).upsert(changed.map(appToRow)); if(error){ console.error("upsert "+table, error); if(error.message&&(error.message.includes("column")||error.message.includes("schema")||error.message.includes("42703"))){ console.warn(`⚠️ COLONNE MANQUANTE dans la table Supabase "${table}". Ajoutez les colonnes manquantes via SQL Editor dans Supabase. Erreur: ${error.message}`); } } }
     // Lignes supprimées → delete (sauf pour les tables protégées)
     if(!NO_AUTO_DELETE[appKey]){
       const removed = before.filter(r=>!afterById[r.id]).map(r=>r.id);
@@ -1472,7 +1476,7 @@ function AppProvider({children}){
   const userScope = useMemo(()=>{
     if(!user || !db) return {subs:[],annexes:[],sucIds:[]};
     if(user.role==="admin"||user.level==="holding"){
-      return {subs:db.subsidiaries.map(s=>s.id), annexes:db.annexes.map(a=>a.id), sucIds:(db.succursales||[]).map(s=>s.id)};
+      return {subs:(db.subsidiaries||[]).map(s=>s.id), annexes:(db.annexes||[]).map(a=>a.id), sucIds:(db.succursales||[]).map(s=>s.id)};
     }
     if(user.level==="subsidiary"){
       // Résolution défensive : si assignmentId est directement une annexe ID (ex: GERW=anx_yvbrtg3),
@@ -1531,8 +1535,8 @@ function AppProvider({children}){
   const scopedAnnexeIds = useMemo(()=>{
     if(!db) return [];
     let ids;
-    if(nav.level==="holding") ids=db.annexes.map(a=>a.id);
-    else if(nav.level==="subsidiary") ids=db.annexes.filter(a=>a.subsidiaryId===nav.id).map(a=>a.id);
+    if(nav.level==="holding") ids=(db.annexes||[]).map(a=>a.id);
+    else if(nav.level==="subsidiary") ids=(db.annexes||[]).filter(a=>a.subsidiaryId===nav.id).map(a=>a.id);
     else if(nav.level==="succursale"){
       const suc=(db.succursales||[]).find(s=>s.id===nav.id);
       ids=suc?[suc.annexeId]:[];
@@ -1548,15 +1552,15 @@ function AppProvider({children}){
   const scopedSubIds = useMemo(()=>{
     if(!db) return [];
     let ids;
-    if(nav.level==="holding") ids=db.subsidiaries.map(s=>s.id);
+    if(nav.level==="holding") ids=(db.subsidiaries||[]).map(s=>s.id);
     else if(nav.level==="subsidiary") ids=[nav.id];
     else if(nav.level==="succursale"){
       const suc=(db.succursales||[]).find(s=>s.id===nav.id);
-      const ann=suc?db.annexes.find(a=>a.id===suc.annexeId):null;
+      const ann=suc?(db.annexes||[]).find(a=>a.id===suc.annexeId):null;
       ids=ann?[ann.subsidiaryId]:[];
     }
-    else { const a=db.annexes.find(x=>x.id===nav.id); ids=a?[a.subsidiaryId]:[]; }
-    return ids.filter(i=> userScope.subs.includes(i) || db.annexes.some(a=>a.subsidiaryId===i&&userScope.annexes.includes(a.id)));
+    else { const a=(db.annexes||[]).find(x=>x.id===nav.id); ids=a?[a.subsidiaryId]:[]; }
+    return ids.filter(i=> userScope.subs.includes(i) || (db.annexes||[]).some(a=>a.subsidiaryId===i&&userScope.annexes.includes(a.id)));
   },[db,nav,userScope]);
 
   // Écran d'erreur ou de chargement — APRÈS tous les hooks (règle de React)
@@ -1573,6 +1577,24 @@ function AppProvider({children}){
     return annexeById(aid)?.subsidiaryId;
   };
   const productsOfSub=(sid)=>db.products.filter(p=>p.subsidiaryId===sid);
+  // Retourne les produits à afficher pour une annexe donnée :
+  // - Accepte un annexeId OU un succursaleId (résout vers l'annexe parente si besoin)
+  // - Si useOwnProducts=true ET des produits propres existent → produits de la filiale
+  // - Sinon → produits du groupe (comportement hérité)
+  const productsForAnnexe=(entityId)=>{
+    // Résoudre succursale → annexe si besoin
+    let annexeId=entityId;
+    const isSuc=(db.succursales||[]).find(s=>s.id===entityId);
+    if(isSuc) annexeId=isSuc.annexeId;
+    const ann=(db.annexes||[]).find(a=>a.id===annexeId);
+    if(ann?.useOwnProducts){
+      const own=db.products.filter(p=>p.annexeId===annexeId);
+      if(own.length>0) return own;
+    }
+    // fallback : produits du groupe
+    const subId=ann?.subsidiaryId;
+    return subId?db.products.filter(p=>p.subsidiaryId===subId&&!p.annexeId):[];
+  };
   const commissionOf=(sid)=>subById(sid)?.commissionRate ?? 0.10;
   // Taux d'un vendeur : son taux perso s'il est défini, sinon celui de sa filiale
   const commissionRateOf=(e)=>{
@@ -1600,7 +1622,7 @@ function AppProvider({children}){
   const value={db,setDb,mutate,user,setUser,nav,setNav,userScope,scopedAnnexeIds,scopedSubIds,scopedSucId,canEditStock,canCashTransfer,canCashUp,canCashDown,canBankDeposit,canBankWithdraw,canBankTransfer,canAnyBank,canTransferStock,canDeclareDefective,
     syncState,lastSavedAt,syncNow,
     pageActions,
-    subById,annexeById,succursaleById,subOfAnnexe,productsOfSub,commissionOf,commissionRateOf,
+    subById,annexeById,succursaleById,subOfAnnexe,productsOfSub,productsForAnnexe,commissionOf,commissionRateOf,
     productById:(id)=>db.products.find(p=>p.id===id),
     empById:(id)=>db.employees.find(e=>e.id===id),
   };
@@ -1648,6 +1670,7 @@ function Login(){
   const [busy,setBusy]=useState(false);
   const tryLogin=async()=>{
     if(busy) return;
+    if(!db||!db.users){ setError("Chargement en cours, veuillez patienter…"); return; }
     const u=db.users.find(x=>x.login.toLowerCase()===login.trim().toLowerCase());
     if(!u){ setError("Identifiant inconnu."); return; }
     if(u.active===false){ setError("Ce compte est désactivé. Contactez la direction."); return; }
@@ -1767,13 +1790,18 @@ function useMetrics(){
   const {db,scopedAnnexeIds,nav,userScope}=useApp();
   return useMemo(()=>{
     const allSucIds=(db.succursales||[]).filter(s=>scopedAnnexeIds.includes(s.annexeId)).map(s=>s.id);
-    // Si l'utilisateur a des succursales spécifiques cochées, restreindre
-    const sucIds=(userScope?.sucIds?.length>0)
+    // Restreindre par permission sucIds UNIQUEMENT si l'utilisateur est lui-même de niveau succursale
+    // (nav holding/subsidiary/annexe → toutes les succursales du scope nav sont visibles)
+    const sucIds=(userScope?.level==="succursale" && userScope?.sucIds?.length>0)
       ? allSucIds.filter(id=>userScope.sucIds.includes(id))
       : allSucIds;
     const allIds=new Set([...scopedAnnexeIds,...sucIds]);
+    // Pour périmètre succursale : les ventes peuvent avoir annexeId = ID annexe OU ID succursale
+    const navSucAnnexeId = nav.level==="succursale"
+      ? (db.succursales||[]).find(s=>s.id===nav.id)?.annexeId
+      : null;
     const inIds=(id)=>{
-      if(nav.level==="succursale") return id===nav.id;
+      if(nav.level==="succursale") return id===nav.id || (navSucAnnexeId && id===navSucAnnexeId);
       return allIds.has(id);
     };
     const sales=db.sales.filter(s=>inIds(s.annexeId));
@@ -2211,28 +2239,31 @@ function logDiff(before,after,user){
 
 /* Employés visibles dans le périmètre courant */
 function useScopedEmployees(){
-  const {db,nav,userScope}=useApp();
+  const {db,nav,userScope,scopedAnnexeIds,scopedSubIds}=useApp();
+  const navAnnexes = scopedAnnexeIds || [];
+  const navSubs    = scopedSubIds    || [];
+  const navSucIds  = nav.level==="succursale"
+    ? [nav.id]
+    : (db.succursales||[]).filter(s=>navAnnexes.includes(s.annexeId)).map(s=>s.id);
   const resolveToAnnexe=(id)=>{
     const suc=(db.succursales||[]).find(s=>s.id===id);
     return suc?suc.annexeId:id;
   };
   const getIds=(e)=>(e.level==="custom"&&Array.isArray(e.annexeIds))?e.annexeIds:[e.assignmentId].filter(Boolean);
-  const inUserScope=(e)=>{
-    // Si userScope.sucIds défini, vérifier que le vendeur est dans une succursale autorisée
-    if(userScope?.sucIds?.length>0&&e.role==="vendeur"&&e.succursaleId){
-      return userScope.sucIds.includes(e.succursaleId);
-    }
-    return true;
-  };
   const inView=(e)=>{
     if(nav.level==="holding"){
       if(e.level==="holding") return true;
-      if(e.level==="subsidiary") return userScope.subs.includes(e.assignmentId);
-      return getIds(e).some(id=>userScope.annexes.includes(resolveToAnnexe(id))||userScope.annexes.includes(id));
+      if(e.level==="subsidiary") return navSubs.includes(e.assignmentId);
+      // Vendeur avec succursale → vérifier via succursale dans le périmètre nav
+      if(e.role==="vendeur"&&e.succursaleId) return navSucIds.includes(e.succursaleId);
+      if(e.role==="vendeur"&&e.assignmentId&&(db.succursales||[]).find(s=>s.id===e.assignmentId)) return navSucIds.includes(e.assignmentId);
+      return getIds(e).some(id=>navAnnexes.includes(resolveToAnnexe(id))||navAnnexes.includes(id));
     }
     if(nav.level==="subsidiary"){
       if(e.level==="subsidiary") return e.assignmentId===nav.id;
-      return getIds(e).some(id=>db.annexes.find(a=>a.id===resolveToAnnexe(id))?.subsidiaryId===nav.id);
+      if(e.role==="vendeur"&&e.succursaleId) return navSucIds.includes(e.succursaleId);
+      if(e.role==="vendeur"&&e.assignmentId&&(db.succursales||[]).find(s=>s.id===e.assignmentId)) return navSucIds.includes(e.assignmentId);
+      return getIds(e).some(id=>navAnnexes.includes(resolveToAnnexe(id))||navAnnexes.includes(id));
     }
     if(nav.level==="succursale"){
       if(e.succursaleId===nav.id) return true;
@@ -2240,23 +2271,36 @@ function useScopedEmployees(){
       if(getIds(e).includes(nav.id)) return true;
       return suc&&e.assignmentId===suc.annexeId&&!e.succursaleId;
     }
+    // niveau annexe
+    if(e.role==="vendeur"&&e.succursaleId){
+      const suc=(db.succursales||[]).find(s=>s.id===e.succursaleId);
+      return suc&&suc.annexeId===nav.id;
+    }
+    // vendeur dont assignmentId est une succursale de cette annexe
+    if(e.role==="vendeur"&&e.assignmentId){
+      const suc=(db.succursales||[]).find(s=>s.id===e.assignmentId);
+      if(suc&&suc.annexeId===nav.id) return true;
+    }
     return getIds(e).some(id=>id===nav.id||resolveToAnnexe(id)===nav.id);
   };
-  return db.employees.filter(e=>e.active&&inView(e)&&inUserScope(e));
+  return (db.employees||[]).filter(e=>e.active&&inView(e));
 }
 
 
 /* Vendeurs (niveau annexe) visibles dans le périmètre courant */
 function useScopedSellers(){
-  const {db,scopedAnnexeIds,nav,scopedSucId,userScope}=useApp();
+  const {db,scopedAnnexeIds,nav,userScope}=useApp();
+  // sucIds visibles dans la nav courante (intersection périmètre utilisateur + nav)
+  const navSucIds = nav.level==="succursale" ? [nav.id]
+    : (db.succursales||[]).filter(s=>scopedAnnexeIds.includes(s.annexeId)).map(s=>s.id);
+
   return db.employees.filter(e=>{
     if(e.role!=="vendeur"||e.active!==true) return false;
-    if(nav.level==="succursale") return e.succursaleId===nav.id;
-    // Si userScope.sucIds est défini, restreindre aux succursales autorisées
-    if(userScope?.sucIds?.length>0 && e.succursaleId){
-      if(!userScope.sucIds.includes(e.succursaleId)) return false;
-    }
-    return e.level==="annexe"&&scopedAnnexeIds.includes(e.assignmentId);
+    // Vendeur rattaché à une succursale (via succursaleId ou assignmentId = suc)
+    const sucId = e.succursaleId || ((db.succursales||[]).find(s=>s.id===e.assignmentId)?.id);
+    if(sucId) return navSucIds.includes(sucId);
+    // Vendeur rattaché directement à une annexe
+    return e.level==="annexe" && scopedAnnexeIds.includes(e.assignmentId);
   });
 }
 
@@ -2281,8 +2325,7 @@ const NAV=[
   ]},
   {group:"Personnel",items:[
     {id:"employees",label:"Employés",ic:"◉"},
-    {id:"attendance",label:"Pointage horaires",ic:"◔"},
-    {id:"payroll",label:"Salaires",ic:"◫"},
+    {id:"payroll",label:"Commissions",ic:"◫"},
     {id:"gestion_salariale",label:"Gestion salariale",ic:"💰",kb:"7"},
     {id:"rh_dashboard",label:"Tableau de bord RH",ic:"📈",kb:"8"},
   ]},
@@ -3627,42 +3670,39 @@ function Dashboard({go}){
   const isAdmin = user?.role==="admin";
   const showPilotage = isAdmin || hasPerm(db,user,"access:dashboard");
 
-  // ── Filtre périmètre : basé sur userScope (périmètre autorisé), indépendant de la navigation ──
-  // userScope.annexes = toutes les annexes auxquelles l'utilisateur a accès
-  // userScope.sucIds  = toutes les succursales auxquelles l'utilisateur a accès
-  // userScope.subs    = toutes les filiales auxquelles l'utilisateur a accès
-  const scopeAnnexes = userScope.annexes || [];
-  const scopeSucIds  = userScope.sucIds  || [];
-  const scopeSubs    = userScope.subs    || [];
+  // ── Filtre périmètre : réactif au périmètre de navigation choisi ──
+  // scopedAnnexeIds & scopedSubIds changent quand l'utilisateur change de filiale/annexe
+  const navAnnexes = scopedAnnexeIds || [];
+  const navSubs    = scopedSubIds    || [];
+  // succursales appartenant aux annexes du périmètre nav
+  const navSucIds  = nav.level==="succursale"
+    ? [nav.id]
+    : (db.succursales||[]).filter(s=>navAnnexes.includes(s.annexeId)).map(s=>s.id);
 
   const inScope = (s) => {
-    if(isAdmin || user?.level==="holding") return true;
-    // L'annexeId peut être une annexe ou une succursale (selon le modèle de données)
+    // Ventes : filtrer par annexeId de la vente ou par vendeur
     if(s.annexeId){
-      if(scopeAnnexes.includes(s.annexeId)) return true;
-      // C'est peut-être une succursale → remonter à l'annexe parente
+      if(navAnnexes.includes(s.annexeId)) return true;
       const suc=(db.succursales||[]).find(x=>x.id===s.annexeId);
-      if(suc && scopeAnnexes.includes(suc.annexeId)) return true;
-      if(suc && scopeSucIds.includes(suc.id)) return true;
+      if(suc && navAnnexes.includes(suc.annexeId)) return true;
+      if(suc && navSucIds.includes(suc.id)) return true;
     }
-    // Filtrer par vendeur assigné à une succursale/annexe dans le périmètre
     if(s.sellerId){
       const emp=(db.employees||[]).find(e=>e.id===s.sellerId);
       if(emp){
-        if(emp.succursaleId && scopeSucIds.includes(emp.succursaleId)) return true;
+        if(emp.succursaleId && navSucIds.includes(emp.succursaleId)) return true;
         const aid=emp.assignmentId||emp.annexeId;
-        if(aid && scopeAnnexes.includes(aid)) return true;
+        if(aid && navAnnexes.includes(aid)) return true;
       }
     }
     return false;
   };
 
-  // Filtre dépenses dans le périmètre (basé sur userScope, pas nav)
+  // Filtre dépenses dans le périmètre nav
   const inScopeExp = (e) => {
-    if(isAdmin || user?.level==="holding") return true;
-    if(e.annexeId && scopeAnnexes.includes(e.annexeId)) return true;
-    if(!e.annexeId && e.subsidiaryId && scopeSubs.includes(e.subsidiaryId)) return true;
-    if(!e.annexeId && !e.subsidiaryId && scopeAnnexes.length > 0) return true;
+    if(e.annexeId && navAnnexes.includes(e.annexeId)) return true;
+    if(!e.annexeId && e.subsidiaryId && navSubs.includes(e.subsidiaryId)) return true;
+    if(!e.annexeId && !e.subsidiaryId && navAnnexes.length > 0) return true;
     return false;
   };
 
@@ -3701,17 +3741,17 @@ function Dashboard({go}){
   const depMonth = (db.expenses||[]).filter(e=>(e.date||"").startsWith(monthKey) && inScopeExp(e));
   const totalDepMonth = depMonth.reduce((s,e)=>s+(Number(e.amount)||0),0);
 
-  // Soldes globaux — filtrés si pas admin
+  // Soldes — filtrés par périmètre de navigation
   const {cash:cashBal, bank:bankBal} = computeBalances(db);
   const totalCaisse = (() => {
-    if(isAdmin || user?.level==="holding") return groupTreasury(db);
-    return scopeAnnexes.reduce((tot,aid)=>{
+    if(nav.level==="holding") return groupTreasury(db);
+    return navAnnexes.reduce((tot,aid)=>{
       return tot+(cashBal[cashKeyOf("annexe",aid)]||0);
     },0);
   })();
   const totalBanque = (() => {
-    if(isAdmin || user?.level==="holding") return Object.values(bankBal||{}).reduce((s,v)=>s+v,0);
-    return scopeSubs.reduce((tot,sid)=>{
+    if(nav.level==="holding") return Object.values(bankBal||{}).reduce((s,v)=>s+v,0);
+    return navSubs.reduce((tot,sid)=>{
       return tot+(bankBal[cashKeyOf("subsidiary",sid)]||0);
     },0);
   })();
@@ -3797,8 +3837,8 @@ function Dashboard({go}){
             {[
               {label:"Recettes de la semaine",val:fcfa(revThisWeek),sub:`${ticketsThisWeek} ticket${ticketsThisWeek!==1?"s":""}`,color:"#0E7C66",ic:"💰"},
               {label:"Dépenses du mois",val:fcfa(totalDepMonth),sub:prettyMonth(monthKey),color:"#e67e22",ic:"📋"},
-              {label:"Caisse totale",val:fcfa(totalCaisse),sub:(isAdmin||user?.level==="holding")?"toutes filiales":`${scopeAnnexes.length} filiale${scopeAnnexes.length!==1?"s":""}`,color:"#1F5FA8",ic:"💵"},
-              {label:"Banque totale",val:fcfa(totalBanque),sub:(isAdmin||user?.level==="holding")?"tous comptes":`${scopeSubs.length} groupe${scopeSubs.length!==1?"s":""}`,color:"#8e44ad",ic:"🏦"},
+              {label:"Caisse totale",val:fcfa(totalCaisse),sub:(isAdmin||user?.level==="holding")?"toutes filiales":`${navAnnexes.length} filiale${navAnnexes.length!==1?"s":""}`,color:"#1F5FA8",ic:"💵"},
+              {label:"Banque totale",val:fcfa(totalBanque),sub:(isAdmin||user?.level==="holding")?"tous comptes":`${navSubs.length} groupe${navSubs.length!==1?"s":""}`,color:"#8e44ad",ic:"🏦"},
             ].map(kpi=>(
               <div key={kpi.label} style={{background:"var(--card,#fff)",border:"1px solid var(--line)",borderRadius:13,padding:"14px 16px",cursor:"default"}}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:8}}>
@@ -3951,10 +3991,11 @@ function DashboardAlertes({go}) {
     <>
       <div style={{display:"flex",flexDirection:"column",gap:8}}>
         {alerts.map(a=>{
-          const dotColor = a.level==="danger"?"#c0392b":a.level==="warn"?"#e67e22":"#2980b9";
+          const dotColor = a.level==="danger"?"#c0392b":a.level==="warn"?"#e67e22":(a.level==="ok"||a.level==="success")?"#1a6b3a":"#2980b9";
+          const bgColor = a.level==="danger"?"#fdecea":a.level==="warn"?"#fff3e0":(a.level==="ok"||a.level==="success")?"#e8f5ee":"#e8f4fd";
           return (
             <button key={a.id} onClick={()=>setOpenAlerte(a)}
-              style={{display:"flex",alignItems:"flex-start",gap:10,padding:"9px 11px",background:a.level==="danger"?"#fdecea":a.level==="warn"?"#fff3e0":"#e8f4fd",border:"none",borderRadius:9,cursor:"pointer",textAlign:"left",width:"100%"}}>
+              style={{display:"flex",alignItems:"flex-start",gap:10,padding:"9px 11px",background:bgColor,border:"none",borderRadius:9,cursor:"pointer",textAlign:"left",width:"100%"}}>
               <span style={{width:8,height:8,borderRadius:"50%",background:dotColor,flexShrink:0,marginTop:4}}></span>
               <div style={{flex:1,minWidth:0}}>
                 <div style={{fontWeight:600,fontSize:12.5,color:dotColor}}>{a.icon} {a.label}</div>
@@ -4202,9 +4243,9 @@ function Sales(){
 
 /* Clôture hebdo : saisie des tickets restants par forfait → calcule vendus */
 function CloseWeekModal({seller,week,onClose}){
-  const {db,mutate,subOfAnnexe,productsOfSub,user}=useApp();
+  const {db,mutate,subOfAnnexe,productsOfSub,productsForAnnexe,user}=useApp();
   const subId=subOfAnnexe(seller.assignmentId);
-  const prods=productsOfSub(subId);
+  const prods=productsForAnnexe(seller.assignmentId);
   const isGoods=db.subsidiaries.find(s=>s.id===subId)?.kind==="goods";
   const unitWord=isGoods?"produits":"tickets";
   const range=rangeFromWeekKey(week);
@@ -4279,7 +4320,7 @@ function CloseWeekModal({seller,week,onClose}){
     });
     const _totalRev=prods.reduce((t,p)=>t+Math.max(0,(supplied[p.id]||0)-(Number(remaining[p.id])||0))*p.price,0);
     sendFCMNotif("✅ Vente clôturée", `${seller.name} — ${fcfa(_totalRev)}`, {type:"sale"});
-    sendTelegram(`✅ <b>Vente clôturée</b>\n${seller.name} — ${fcfa(_totalRev)}`, "sale");
+    sendTelegram(`✅ <b>Vente clôturée</b>\n${seller.name} — ${fcfa(_totalRev)}`, "sale", seller.assignmentId);
     onClose();
   };
   const totalSold=prods.reduce((t,p)=>t+Math.max(0,(supplied[p.id]||0)-(Number(remaining[p.id])||0)),0);
@@ -4339,7 +4380,7 @@ function CloseWeekModal({seller,week,onClose}){
    ticket initial + réappros (plusieurs fois/semaine)
    ========================================================= */
 function Inventory(){
-  const {db,user,subOfAnnexe,productsOfSub,canEditStock,canTransferStock,canDeclareDefective}=useApp();
+  const {db,user,subOfAnnexe,productsOfSub,productsForAnnexe,canEditStock,canTransferStock,canDeclareDefective}=useApp();
   const canEditTransfer=hasPerm(db,user,"do:edit_transfer");
   const M=useMetrics();
   const sellers=useScopedSellers();
@@ -4377,7 +4418,7 @@ function Inventory(){
         ]}>
       {(fsellers)=> fsellers.length? fsellers.map(sel=>{
         const subId=subOfAnnexe(sel.succursaleId||sel.assignmentId);
-        const prods=productsOfSub(subId);
+        const prods=productsForAnnexe(sel.succursaleId||sel.assignmentId);
         const movements=db.inventory.filter(i=>i.sellerId===sel.id&&i.week===week);
         const byProd=prods.map(p=>{
           const init=movements.filter(m=>m.productId===p.id&&m.type==="initial").reduce((s,m)=>s+m.qty,0);
@@ -4512,9 +4553,9 @@ function Inventory(){
    initial peut sembler disparaître.
    ========================================================= */
 function InventoryDiagModal({seller,week,onClose}){
-  const {db,mutate,subOfAnnexe,productsOfSub}=useApp();
+  const {db,mutate,subOfAnnexe,productsOfSub,productsForAnnexe}=useApp();
   const subId=subOfAnnexe(seller.assignmentId);
-  const prods=productsOfSub(subId);
+  const prods=productsForAnnexe(seller.assignmentId);
   const [tab,setTab]=useState("tickets"); // tickets | appro | sales | problems
 
   // Tous les tickets d'inventaire de ce vendeur pour cette semaine
@@ -4719,9 +4760,9 @@ function InventoryDiagModal({seller,week,onClose}){
 }
 
 function SupplyModal({seller,week,onClose}){
-  const {db,mutate,subOfAnnexe,productsOfSub,canEditStock}=useApp();
+  const {db,mutate,subOfAnnexe,productsOfSub,productsForAnnexe,canEditStock}=useApp();
   const subId=subOfAnnexe(seller.assignmentId);
-  const prods=productsOfSub(subId);
+  const prods=productsForAnnexe(seller.assignmentId);
   const isGoods=db.subsidiaries.find(s=>s.id===subId)?.kind==="goods";
   const unitWord=isGoods?"produits":"tickets";
   const carryover = db.inventory.find(i=>i.sellerId===seller.id&&i.week===week&&i.type==="initial"&&i.carryover===true&&(i.qty||0)>0);
@@ -4766,7 +4807,7 @@ function SupplyModal({seller,week,onClose}){
     });
     if(approLines.length>0){
       const detail=approLines.map(l=>`• ${l.prodName}: ${l.qty}`).join("\n");
-      sendTelegram(`📦 <b>Approvisionnement</b>\nVendeur: ${seller.name}\n${detail}`, "appro");
+      sendTelegram(`📦 <b>Approvisionnement</b>\nVendeur: ${seller.name}\n${detail}`, "appro", seller.assignmentId);
     }
     onClose();
   };
@@ -4798,9 +4839,9 @@ function SupplyModal({seller,week,onClose}){
 
 /* Transfert de stock entre deux vendeurs (neutre comptablement) */
 function TransferModal({fromSeller,week,onClose}){
-  const {db,mutate,subOfAnnexe,productsOfSub,annexeById}=useApp();
+  const {db,mutate,subOfAnnexe,productsOfSub,productsForAnnexe,annexeById}=useApp();
   const subId=subOfAnnexe(fromSeller.assignmentId);
-  const prods=productsOfSub(subId);
+  const prods=productsForAnnexe(fromSeller.assignmentId);
   // Receveurs possibles : tous les vendeurs de la même filiale (même produit), sauf le donneur
   const sellersOfSub=db.employees.filter(e=>e.role==="vendeur"&&e.level==="annexe"&&e.active&&subOfAnnexe(e.assignmentId)===subId&&e.id!==fromSeller.id);
   const [toId,setToId]=useState(sellersOfSub[0]?.id||"");
@@ -4825,7 +4866,7 @@ function TransferModal({fromSeller,week,onClose}){
       // Entrée chez le receveur (quantité positive)
       d.inventory.push({id:uid("inv"),transferId:tid,subsidiaryId:subId,annexeId:toSeller.succursaleId||toSeller.assignmentId,sellerId:toSeller.id,productId,week:toWeek,type:"transfer",qty:q,date:today(),note:`Transfert reçu de ${fromSeller.name}`,transfer:true});
     });
-    sendTelegram(`🔄 <b>Transfert de stock</b>\nProduit: ${prodName}\nQuantité: ${q}\nDe: ${fromSeller.name} → À: ${toSeller?.name||"?"}`, "stockTransfer");
+    sendTelegram(`🔄 <b>Transfert de stock</b>\nProduit: ${prodName}\nQuantité: ${q}\nDe: ${fromSeller.name} → À: ${toSeller?.name||"?"}`, "stockTransfer", fromSeller.assignmentId);
     onClose();
   };
   return (
@@ -4939,9 +4980,9 @@ function EditTransferModal({mov,onClose}){
 
 /* Déclaration de produits/tickets défectueux (perte sèche, sort du stock sans vente) */
 function DefectiveModal({seller,week,onClose}){
-  const {db,mutate,subOfAnnexe,productsOfSub}=useApp();
+  const {db,mutate,subOfAnnexe,productsOfSub,productsForAnnexe}=useApp();
   const subId=subOfAnnexe(seller.assignmentId);
-  const prods=productsOfSub(subId);
+  const prods=productsForAnnexe(seller.assignmentId);
   const [productId,setProductId]=useState(prods[0]?.id||"");
   const [qty,setQty]=useState(0);
   const [reason,setReason]=useState("");
@@ -4959,7 +5000,7 @@ function DefectiveModal({seller,week,onClose}){
       // Sortie défectueux (quantité négative) — perte sèche, jamais comptée comme vente
       d.inventory.push({id:uid("inv"),subsidiaryId:subId,annexeId:seller.succursaleId||seller.assignmentId,sellerId:seller.id,productId,week,type:"defective",qty:-q,date:today(),note:reason?`Défectueux : ${reason}`:"Défectueux",defective:true});
     });
-    sendTelegram(`⚠️ <b>Produits défectueux déclarés</b>\nVendeur: ${seller.name}\nProduit: ${prodName}\nQuantité: ${q}${reason?`\nMotif: ${reason}`:""}`, "stockDefective");
+    sendTelegram(`⚠️ <b>Produits défectueux déclarés</b>\nVendeur: ${seller.name}\nProduit: ${prodName}\nQuantité: ${q}${reason?`\nMotif: ${reason}`:""}`, "stockDefective", seller.assignmentId);
     onClose();
   };
   return (
@@ -5206,13 +5247,21 @@ function CashPeriodSummary({visibleKeys}){
    triées par date, avec tableau de bord (total entrées/sorties/solde) et filtre semaine/mois/année.
    Section autonome (accessible depuis son propre menu). */
 function CashJournal(){
-  const {db,nav,subById,annexeById,userScope,empById}=useApp();
-  // Périmètre visible (mêmes règles que la section Caisse)
+  const {db,nav,subById,annexeById,userScope,empById,scopedAnnexeIds,scopedSubIds}=useApp();
+  const _navAnxJ = scopedAnnexeIds||[];
+  const _navSubsJ = scopedSubIds||[];
+  // Périmètre visible réactif au nav (mêmes règles que la section Caisse)
   const visibleKeys=new Set();
-  if(nav.level==="holding"){ visibleKeys.add("holding"); db.subsidiaries.filter(s=>userScope.subs.includes(s.id)).forEach(s=>visibleKeys.add(cashKeyOf("subsidiary",s.id))); db.annexes.filter(a=>userScope.annexes.includes(a.id)).forEach(a=>{visibleKeys.add(cashKeyOf("annexe",a.id));(db.succursales||[]).filter(s=>s.annexeId===a.id).forEach(s=>visibleKeys.add(cashKeyOf("annexe",s.id)));});}
+  if(nav.level==="holding"){ visibleKeys.add("holding"); db.subsidiaries.filter(s=>_navSubsJ.length===0||_navSubsJ.includes(s.id)).forEach(s=>visibleKeys.add(cashKeyOf("subsidiary",s.id))); db.annexes.filter(a=>_navAnxJ.length===0||_navAnxJ.includes(a.id)).forEach(a=>{visibleKeys.add(cashKeyOf("annexe",a.id));(db.succursales||[]).filter(s=>s.annexeId===a.id).forEach(s=>visibleKeys.add(cashKeyOf("annexe",s.id)));});}
   else if(nav.level==="subsidiary"){ visibleKeys.add(cashKeyOf("subsidiary",nav.id)); db.annexes.filter(a=>a.subsidiaryId===nav.id).forEach(a=>{visibleKeys.add(cashKeyOf("annexe",a.id));(db.succursales||[]).filter(s=>s.annexeId===a.id).forEach(s=>visibleKeys.add(cashKeyOf("annexe",s.id)));});}
   else if(nav.level==="annexe"){ visibleKeys.add(cashKeyOf("annexe",nav.id)); (db.succursales||[]).filter(s=>s.annexeId===nav.id).forEach(s=>visibleKeys.add(cashKeyOf("annexe",s.id))); }
-  else if(nav.level==="succursale"){ visibleKeys.add(cashKeyOf("annexe",nav.id)); }
+  else if(nav.level==="succursale"){
+    // Les ventes clôturées ont annexeId = succursaleId (seller.succursaleId||seller.assignmentId)
+    // donc on ajoute l'id de la succursale comme clé "annexe" pour que inScope() les trouve.
+    // NE PAS ajouter l'annexe parente : sinon toutes les succursales sœurs remontent aussi.
+    visibleKeys.add(cashKeyOf("succursale",nav.id));
+    visibleKeys.add(cashKeyOf("annexe",nav.id)); // ventes avec annexeId=sucId
+  }
   enrichVisibleKeysWithMigratedSubs(db,visibleKeys);
   const [gran,setGran]=useState("week");
   const [week,setWeek]=useState(()=>weekKey(today()));
@@ -5290,12 +5339,32 @@ function CashJournal(){
   const entries=[];
   const exits=[];
 
+  // Vendeurs de la succursale courante — pour trouver les ventes dont annexeId = annexeParente
+  // (quand le vendeur n'a pas de succursaleId renseigné, annexeId = assignmentId = annexeParente)
+  // Vendeurs de la succursale courante.
+  // Cas 1 : vendeur avec succursaleId = nav.id (lien explicite)
+  // Cas 2 : vendeur avec assignmentId = nav.id (succursale à id anx_ héritée d'une ancienne annexe)
+  const sucVendorIds = nav.level==="succursale"
+    ? new Set((db.employees||[]).filter(e=>
+        e.role==="vendeur" && e.active!==false &&
+        (e.succursaleId===nav.id || e.assignmentId===nav.id)
+      ).map(e=>e.id))
+    : null;
   if(!(filialeMode && (mode==="filiale"||mode==="annexes"))){
     // ---- MODE RÉEL (par défaut) : vrais flux d'argent, SANS les transferts inter-caisses ----
     // Ventes regroupées par vendeur → entrées
     const byVendeur={};
     (db.sales||[]).forEach(s=>{
-      if(!s.annexeId||!inScope("annexe",s.annexeId)) return;
+      // Filtre périmètre :
+      // Cas 1 : vente avec annexeId = sucId (vendeur a succursaleId renseigné)
+      // Cas 2 : vente avec annexeId = annexeParente (vendeur sans succursaleId) → filtrer par sellerId
+      if(nav.level==="succursale"){
+        const bySucAnnexe = s.annexeId && inScope("annexe",s.annexeId);
+        const bySellerOfSuc = sucVendorIds && s.sellerId && sucVendorIds.has(s.sellerId);
+        if(!bySucAnnexe && !bySellerOfSuc) return;
+      } else {
+        if(!s.annexeId||!inScope("annexe",s.annexeId)) return;
+      }
       if(!inPeriodSale(s)) return;  // règle du jeudi respectée
       const dt=saleDate(s);
       const v=s.revenue||0; if(v<=0) return;
@@ -5308,7 +5377,14 @@ function CashJournal(){
     Object.values(byVendeur).forEach(e=>entries.push(e));
     // Dépenses → sorties
     (db.expenses||[]).forEach(e=>{
-      if(!inScopeExpense(e)) return;
+      // Filtre périmètre
+      if(nav.level==="succursale"){
+        // Dépense rattachée à cette succursale directement ou via succursaleId
+        const matchDirect = (e.annexeId && inScope("annexe",e.annexeId)) || e.succursaleId===nav.id;
+        if(!matchDirect) return;
+      } else {
+        if(!inScopeExpense(e)) return;
+      }
       if(!inPeriod(e.date)) return;
       const v=e.amount||0; if(v>0) exits.push({date:e.date,label:"Dépense"+(e.category?" — "+e.category:"")+(e.note?" ("+e.note+")":""),amount:v});
     });
@@ -5586,7 +5662,8 @@ function CashJournal(){
 }
 
 function Cash(){
-  const {db,mutate,nav,subById,annexeById,userScope,canCashTransfer,user}=useApp();
+  const {db,mutate,nav,subById,annexeById,userScope,canCashTransfer,user,scopedAnnexeIds,scopedSubIds}=useApp();
+
   const [moveOpen,setMoveOpen]=useState(false);
   const [equityOpen,setEquityOpen]=useState(false);
   const [editEquity,setEditEquity]=useState(null);
@@ -5606,19 +5683,22 @@ function Cash(){
   const balSuc=(sucId)=>bal("annexe",sucId)||bal("succursale",sucId);
   let mainTitle, mainBalance, mainSub, children=[];
   let consolidated=null, consolidatedLabel="";
+  const _navAnxC = scopedAnnexeIds||[];
+  const _navSubsC = scopedSubIds||[];
   if(nav.level==="holding"){
     mainTitle="Caisse centrale — Holding"; mainBalance=bal("holding"); mainSub="Alimentée par les remontées des groupes";
-    children=db.subsidiaries.filter(s=>userScope.subs.includes(s.id)).map(s=>({label:`${s.code} · ${s.name}`,value:bal("subsidiary",s.id),consolidated:subTreasury(db,s.id),level:"subsidiary",id:s.id}));
+    children=db.subsidiaries.filter(s=>_navSubsC.includes(s.id)||_navSubsC.length===0).map(s=>({label:`${s.code} · ${s.name}`,value:bal("subsidiary",s.id),consolidated:subTreasury(db,s.id),level:"subsidiary",id:s.id}));
     consolidated=groupTreasury(db); consolidatedLabel="Trésorerie totale du groupe";
   } else if(nav.level==="subsidiary"){
     const s=subById(nav.id);
     mainTitle=`Caisse — ${s?.name||""}`; mainBalance=bal("subsidiary",nav.id); mainSub="Remontées des filiales − dépenses − remontées vers holding";
-    children=db.annexes.filter(a=>a.subsidiaryId===nav.id&&userScope.annexes.includes(a.id)).map(a=>({label:a.code,value:bal("annexe",a.id),consolidated:subTreasury(db,nav.id),level:"annexe",id:a.id}));
+    children=db.annexes.filter(a=>a.subsidiaryId===nav.id&&(_navAnxC.includes(a.id)||_navAnxC.length===0)).map(a=>({label:a.code,value:bal("annexe",a.id),consolidated:subTreasury(db,nav.id),level:"annexe",id:a.id}));
     consolidated=subTreasury(db,nav.id); consolidatedLabel=`Trésorerie consolidée — ${s?.code||"filiale"}`;
   } else if(nav.level==="annexe"){
     const a=annexeById(nav.id);
     mainTitle=`Caisse — ${a?.code||""}`; mainBalance=bal("annexe",nav.id); mainSub="Recettes des ventes − dépenses − remontées";
-    const succs=(db.succursales||[]).filter(s=>s.annexeId===nav.id&&s.active!==false&&(!userScope?.sucIds?.length||userScope.sucIds.includes(s.id)));
+    const _navSucC=(db.succursales||[]).filter(s=>_navAnxC.includes(s.annexeId)).map(s=>s.id);
+    const succs=(db.succursales||[]).filter(s=>s.annexeId===nav.id&&s.active!==false&&(_navSucC.length===0||_navSucC.includes(s.id)));
     if(succs.length>0){
       children=succs.map(s=>({label:s.code||s.name,value:balSuc(s.id),level:"succursale",id:s.id}));
       consolidated=succs.reduce((t,s)=>t+balSuc(s.id),0)+bal("annexe",nav.id);
@@ -5629,13 +5709,14 @@ function Cash(){
     mainTitle=`Caisse — ${suc?.code||suc?.name||""}`; mainBalance=balSuc(nav.id); mainSub="Remises vendeurs − dépenses − remontées";
   }
 
-  // Historique des mouvements de caisse visibles dans le périmètre
+  // Historique des mouvements de caisse visibles dans le périmètre nav
   const visibleKeys=new Set();
-  if(nav.level==="holding"){ visibleKeys.add("holding"); db.subsidiaries.filter(s=>userScope.subs.includes(s.id)).forEach(s=>visibleKeys.add(cashKeyOf("subsidiary",s.id))); db.annexes.filter(a=>userScope.annexes.includes(a.id)).forEach(a=>visibleKeys.add(cashKeyOf("annexe",a.id))); }
+  if(nav.level==="holding"){ visibleKeys.add("holding"); db.subsidiaries.filter(s=>_navSubsC.length===0||_navSubsC.includes(s.id)).forEach(s=>visibleKeys.add(cashKeyOf("subsidiary",s.id))); db.annexes.filter(a=>_navAnxC.length===0||_navAnxC.includes(a.id)).forEach(a=>visibleKeys.add(cashKeyOf("annexe",a.id))); }
   else if(nav.level==="subsidiary"){ visibleKeys.add(cashKeyOf("subsidiary",nav.id)); db.annexes.filter(a=>a.subsidiaryId===nav.id).forEach(a=>{visibleKeys.add(cashKeyOf("annexe",a.id));(db.succursales||[]).filter(s=>s.annexeId===a.id).forEach(s=>visibleKeys.add(cashKeyOf("annexe",s.id)));}); }
   else if(nav.level==="annexe"){ visibleKeys.add(cashKeyOf("annexe",nav.id)); (db.succursales||[]).filter(s=>s.annexeId===nav.id).forEach(s=>visibleKeys.add(cashKeyOf("annexe",s.id))); }
   else if(nav.level==="succursale"){
-    // Les cashMoves de remise ont toLevel:"annexe" avec l'id de la succursale — on ajoute les deux clés
+    // Les cashMoves/ventes ont fromId/toId/annexeId = sucId → clé "annexe:sucId"
+    // NE PAS ajouter l'annexe parente : sinon toutes les succursales sœurs remontent aussi.
     visibleKeys.add(cashKeyOf("succursale",nav.id));
     visibleKeys.add(cashKeyOf("annexe",nav.id));
   }
@@ -6471,8 +6552,8 @@ function VendorCashPanel({vendors,balances,totalCash}){
     setPartials({});
     setMotifs({});
     alert(`✅ ${moves.length} remise(s) effectuée(s) — Total : ${fcfa(totalRemise)}`);
-    moves.forEach(({vendorName,montant})=>{
-      sendTelegram(`🎁 <b>Remise vendeur</b>\nVendeur: ${vendorName} — ${fcfa(montant)}`, "remise");
+    moves.forEach(({vendorName,montant,annexeId})=>{
+      sendTelegram(`🎁 <b>Remise vendeur</b>\nVendeur: ${vendorName} — ${fcfa(montant)}`, "remise", annexeId);
     });
   };
 
@@ -7109,11 +7190,35 @@ function Banks(){
   const [add,setAdd]=useState(false);
   const [edit,setEdit]=useState(null);
   const [statement,setStatement]=useState(null);
-  // Filtre périmètre : ne montrer que les banques rattachées aux subsidiaries du périmètre
+  // Filtre périmètre : banques visibles selon le niveau de navigation
   const banks=(db.banks||[]).filter(b=>{
-    if(isAdmin||user?.level==="holding") return true;
-    if(!b.subsidiaryId) return true; // banque globale visible par tous
-    return (userScope.subs||[]).includes(b.subsidiaryId);
+    const scope=b.scope||"global";
+    // Banque globale : toujours visible
+    if(scope==="global") return true;
+    if(nav.level==="holding") return true;
+    if(nav.level==="subsidiary"){
+      if(scope==="holding") return false;
+      if(scope==="subsidiary") return b.scopeId===nav.id;
+      // banque d'une annexe de cette filiale
+      if(scope==="annexe"){ const a=annexeById(b.scopeId); return a?.subsidiaryId===nav.id; }
+      return false;
+    }
+    if(nav.level==="annexe"){
+      if(scope==="subsidiary"){
+        const a=annexeById(nav.id); return b.scopeId===a?.subsidiaryId;
+      }
+      if(scope==="annexe") return b.scopeId===nav.id;
+      return false;
+    }
+    if(nav.level==="succursale"){
+      const suc=(db.succursales||[]).find(s=>s.id===nav.id);
+      if(scope==="annexe") return b.scopeId===suc?.annexeId;
+      if(scope==="subsidiary"){
+        const a=annexeById(suc?.annexeId); return b.scopeId===a?.subsidiaryId;
+      }
+      return false;
+    }
+    return true;
   });
   const del=(id)=>{ if(!confirm("Supprimer cette banque physique ? Les opérations déjà enregistrées ne seront pas supprimées mais perdront leur rattachement.")) return; mutate(d=>{ d.banks=(d.banks||[]).filter(b=>b.id!==id); }); };
   usePageActions({ onNew: canManage?()=>setAdd(true):null });
@@ -7283,7 +7388,8 @@ function BankStatementModal({acc,onClose}){
 }
 
 function Bank(){
-  const {db,mutate,nav,subById,annexeById,userScope,canAnyBank,canBankDeposit,canBankWithdraw,canBankTransfer,user}=useApp();
+  const {db,mutate,nav,subById,annexeById,userScope,canAnyBank,canBankDeposit,canBankWithdraw,canBankTransfer,user,scopedAnnexeIds,scopedSubIds}=useApp();
+
   const [moveOpen,setMoveOpen]=useState(false);
   const [equityOpen,setEquityOpen]=useState(false);
   const [editEquity,setEditEquity]=useState(null);
@@ -7294,25 +7400,31 @@ function Bank(){
   const bk=(level,id)=>B.bank[cashKeyOf(level,id)]||0;
   const ch=(level,id)=>B.cash[cashKeyOf(level,id)]||0;
 
+  const _navAnxB = scopedAnnexeIds||[];
+  const _navSubsB = scopedSubIds||[];
   let mainTitle, mainBank, mainCash, children=[];
   let consolidated=null, consolidatedLabel="";
   if(nav.level==="holding"){
     mainTitle="Banque centrale — Holding"; mainBank=bk("holding"); mainCash=ch("holding");
-    children=db.subsidiaries.filter(s=>userScope.subs.includes(s.id)).map(s=>({label:`${s.code} · ${s.name}`,value:bk("subsidiary",s.id),consolidated:subBankTreasury(db,s.id),level:"subsidiary",id:s.id}));
+    children=db.subsidiaries.filter(s=>_navSubsB.length===0||_navSubsB.includes(s.id)).map(s=>({label:`${s.code} · ${s.name}`,value:bk("subsidiary",s.id),consolidated:subBankTreasury(db,s.id),level:"subsidiary",id:s.id}));
     consolidated=groupBankTreasury(db); consolidatedLabel="Banque totale du groupe";
   } else if(nav.level==="subsidiary"){
     const s=subById(nav.id);
     mainTitle=`Banque — ${s?.name||""}`; mainBank=bk("subsidiary",nav.id); mainCash=ch("subsidiary",nav.id);
-    children=db.annexes.filter(a=>a.subsidiaryId===nav.id&&userScope.annexes.includes(a.id)).map(a=>({label:a.code,value:bk("annexe",a.id),level:"annexe",id:a.id}));
+    children=db.annexes.filter(a=>a.subsidiaryId===nav.id&&(_navAnxB.length===0||_navAnxB.includes(a.id))).map(a=>({label:a.code,value:bk("annexe",a.id),level:"annexe",id:a.id}));
     consolidated=subBankTreasury(db,nav.id); consolidatedLabel=`Banque consolidée — ${s?.code||"filiale"}`;
+  } else if(nav.level==="succursale"){
+    const suc=(db.succursales||[]).find(s=>s.id===nav.id);
+    mainTitle=`Banque — ${suc?.code||suc?.name||""}`; mainBank=bk("succursale",nav.id)||bk("annexe",nav.id); mainCash=ch("succursale",nav.id)||ch("annexe",nav.id);
   } else {
     const a=annexeById(nav.id);
     mainTitle=`Banque — ${a?.code||""}`; mainBank=bk("annexe",nav.id); mainCash=ch("annexe",nav.id);
   }
 
   const visibleKeys=new Set();
-  if(nav.level==="holding"){ visibleKeys.add("holding"); db.subsidiaries.filter(s=>userScope.subs.includes(s.id)).forEach(s=>visibleKeys.add(cashKeyOf("subsidiary",s.id))); db.annexes.filter(a=>userScope.annexes.includes(a.id)).forEach(a=>visibleKeys.add(cashKeyOf("annexe",a.id))); }
+  if(nav.level==="holding"){ visibleKeys.add("holding"); db.subsidiaries.filter(s=>_navSubsB.length===0||_navSubsB.includes(s.id)).forEach(s=>visibleKeys.add(cashKeyOf("subsidiary",s.id))); db.annexes.filter(a=>_navAnxB.length===0||_navAnxB.includes(a.id)).forEach(a=>visibleKeys.add(cashKeyOf("annexe",a.id))); }
   else if(nav.level==="subsidiary"){ visibleKeys.add(cashKeyOf("subsidiary",nav.id)); db.annexes.filter(a=>a.subsidiaryId===nav.id).forEach(a=>visibleKeys.add(cashKeyOf("annexe",a.id))); }
+  else if(nav.level==="succursale"){ visibleKeys.add(cashKeyOf("succursale",nav.id)); visibleKeys.add(cashKeyOf("annexe",nav.id)); }
   else { visibleKeys.add(cashKeyOf("annexe",nav.id)); }
   const moves=(db.bankMoves||[]).filter(m=>visibleKeys.has(cashKeyOf(m.fromLevel,m.fromId))||(m.toLevel&&visibleKeys.has(cashKeyOf(m.toLevel,m.toId)))).sort((a,b)=>(b.date||"").localeCompare(a.date||""));
   // Apports / retraits de fonds propres visant la BANQUE, dans le périmètre visible.
@@ -7940,14 +8052,15 @@ function ExpenseModal({exp,onClose}){
       }
     });
     if(!editing) sendFCMNotif("💰 Dépense enregistrée", `${fcfa(montant)} — ${f.category||"Sans catégorie"}`, {type:"expense"});
-    if(!editing) sendTelegram(`💰 <b>Dépense enregistrée</b>\n${fcfa(montant)} — ${f.category||"Sans catégorie"}`, "expense");
+    const _tgAnnId=level==="annexe"?id:null; const _tgSubId=level==="subsidiary"?id:null;
+    if(!editing) sendTelegram(`💰 <b>Dépense enregistrée</b>\n${fcfa(montant)} — ${f.category||"Sans catégorie"}`, "expense", _tgAnnId, _tgSubId);
     onClose();
   };
   const remove=()=>{
     if(confirm(`Supprimer définitivement cette dépense de ${fcfa(exp.amount)} (${exp.category}) ?`)){
       // Suppression directe Supabase en parallèle du diff (sécurité : garantit la suppression même si saveDiff rate)
       if(sb) sb.from("expenses").delete().eq("id",exp.id).then(({error})=>{ if(error) console.error("delete expense direct",error); });
-      sendTelegram(`🗑️ <b>Dépense supprimée</b>\nMontant: ${fcfa(exp.amount||0)} (${exp.category||""})`, "expenseDelete");
+      sendTelegram(`🗑️ <b>Dépense supprimée</b>\nMontant: ${fcfa(exp.amount||0)} (${exp.category||""})`, "expenseDelete", exp.annexeId, exp.subsidiaryId);
       mutate(d=>{ d.expenses=d.expenses.filter(x=>x.id!==exp.id); });
       onClose();
     }
@@ -8100,7 +8213,14 @@ function Employees(){
           placeholder="🔍 Rechercher un employé (nom, téléphone…)"
           filters={[
             {key:"role",label:"Rôle",options:ROLES.map(r=>({v:r.v,l:r.l})),match:(e,v)=>e.role===v},
-            {key:"annexe",label:"Affectation",options:db.annexes.map(a=>({v:a.id,l:a.code})),match:(e,v)=>e.assignmentId===v},
+            {key:"annexe",label:"Affectation",options:[
+              ...db.annexes.map(a=>({v:a.id,l:a.code||a.name})),
+              ...(db.succursales||[]).map(s=>{const a=db.annexes.find(x=>x.id===s.annexeId);return {v:s.id,l:(a?.code||"")+" › "+(s.code||s.name)};})
+            ],match:(e,v)=>{
+              if(e.level==="custom"&&Array.isArray(e.annexeIds)) return e.annexeIds.includes(v);
+              if(e.succursaleId) return e.succursaleId===v||e.assignmentId===v;
+              return e.assignmentId===v;
+            }},
             {key:"statut",label:"Statut",options:[{v:"actif",l:"Actif"},{v:"inactif",l:"Inactif"}],match:(e,v)=>v==="actif"?e.active!==false:e.active===false},
           ]}>
         {(filtered)=>(
@@ -8695,229 +8815,52 @@ function overtimePayOf(db,e,month){
   return Math.round(approvedHours*(base/threshold));
 }
 function Payroll(){
-  const {db,mutate,commissionRateOf,nav,subById,annexeById,subOfAnnexe,user}=useApp();
-  const canPaySalaries=hasPerm(db,user,"do:pay_salaries");
-  const canCancelSalaries=hasPerm(db,user,"do:cancel_salaries");
-  const [payOpen,setPayOpen]=useState(false);
+  const {db,commissionRateOf,nav,subById,annexeById,user}=useApp();
   const M=useMetrics();
-  const [gran,setGran]=useState("month"); // week | month | year
+  const [gran,setGran]=useState("month");
   const [month,setMonth]=useState(M.months[0]||today().slice(0,7));
   const [week,setWeek]=useState(()=>weekKey(today()));
   const [year,setYear]=useState(()=>today().slice(0,4));
   const months=[...new Set([month,...M.months])].sort().reverse();
   const weeksAvail=[...new Set([week,...(M.weeks||[])])];
   const yearsAvail=[...new Set([year,...(db.sales||[]).map(s=>(s.weekStart||"").slice(0,4)).filter(Boolean),today().slice(0,4)])].sort().reverse();
-  const emps=useScopedEmployees();
+
   const scopeLabel = nav.level==="holding"?"Holding GENERATION X":nav.level==="subsidiary"?(subById(nav.id)?.name||""):nav.level==="succursale"?((db.succursales||[]).find(x=>x.id===nav.id)?.name||""):(annexeById(nav.id)?.code||"");
-  // Une vente compte dans la période choisie (pour les commissions)
+
   const saleInPeriod=(s)=>{
     if(gran==="year") return (s.weekStart||"").slice(0,4)===year;
     if(gran==="month") return saleMonth(s)===month;
-    return s.week===week; // semaine
+    return s.week===week;
   };
-  // Pour le mois : liste des semaines rattachées à ce mois (convention standard : mois du jeudi),
-  // cohérente avec le bilan. Sert à afficher le détail au gérant.
-  const weeksOfMonth=(monthKeyStr)=> weeksOfMonthISO(monthKeyStr);
-  const monthWeeks = gran==="month" ? weeksOfMonth(month) : [];
+  const monthWeeks = gran==="month" ? weeksOfMonthISO(month) : [];
   const monthWeeksLabel = monthWeeks.length ? monthWeeks.map(w=>"S"+w.split("-S")[1]).join(", ") : "";
-  const periodLabel = gran==="year"?year
-    : gran==="month"?(prettyMonth(month)+(monthWeeksLabel?" · "+monthWeeksLabel:""))
-    : weekLabelFull(week);
+  const periodLabel = gran==="year"?year : gran==="month"?(prettyMonth(month)+(monthWeeksLabel?" · "+monthWeeksLabel:"")) : weekLabelFull(week);
 
-  const otKey=(eid)=>`${eid}-${month}`;
+  // Vendeurs uniquement
+  const emps=useScopedEmployees().filter(e=>e.role==="vendeur");
   const rows=emps.map(e=>{
-    const base=e.baseSalary||0;
-    let commission=0;
-    if(e.role==="vendeur"&&e.level==="annexe"){
-      const rev=db.sales.filter(s=>s.sellerId===e.id&&saleInPeriod(s)).reduce((s,x)=>s+x.revenue,0);
-      commission=rev*commissionRateOf(e);
-    }
-    // Heures du mois
-    const recs=db.attendance.filter(a=>a.employeeId===e.id&&monthKey(a.date)===month);
-    const hours=recs.reduce((s,a)=>s+hoursBetween(a.checkIn,a.checkOut),0);
-    const threshold=e.monthlyHoursThreshold||240;
-    const otHoursRaw=Math.max(0,hours-threshold);
-    const hourlyRate=base>0?base/threshold:0;
-    // État de validation
-    const appr=db.overtimeApprovals[otKey(e.id)]; // {status, approvedHours}
-    const eligible=base>0&&otHoursRaw>0;
-    const status=appr?appr.status:(eligible?"pending":"none");
-    const approvedHours=appr&&appr.status==="approved"?(appr.approvedHours??otHoursRaw):0;
-    const otPay=Math.round(approvedHours*hourlyRate);
-    return {e,base,commission,hours,threshold,otHoursRaw,hourlyRate,status,approvedHours,otPay,total:base+commission+otPay};
+    const rev=db.sales.filter(s=>s.sellerId===e.id&&saleInPeriod(s)).reduce((s,x)=>s+x.revenue,0);
+    const commission=Math.round(rev*commissionRateOf(e));
+    return {e,rev,commission};
   });
-  const tot=rows.reduce((t,r)=>({base:t.base+r.base,commission:t.commission+r.commission,ot:t.ot+r.otPay,total:t.total+r.total}),{base:0,commission:0,ot:0,total:0});
-  const pendingCount=rows.filter(r=>r.status==="pending").length;
+  const totRev=rows.reduce((s,r)=>s+r.rev,0);
+  const totComm=rows.reduce((s,r)=>s+r.commission,0);
 
-  // ===== PAIE : enregistrer / annuler =====
-  // Une paie enregistrée = une entrée salaryRuns {id, month, at, by, items:[{empId,amount}], expenseIds:[...]}
-  const runsThisMonth=(db.salaryRuns||[]).filter(r=>r.month===month);
-  const paidEmpIds=new Set(runsThisMonth.flatMap(r=>r.items.map(i=>i.empId)));
-  const isPaid=(empId)=>paidEmpIds.has(empId);
-
-  // Enregistre la paie des employés sélectionnés → crée les dépenses groupées par niveau (annexe/filiale)
-  const enregistrerPaie=(selectedIds)=>{
-    const aPayer=rows.filter(r=>selectedIds.includes(r.e.id)&&r.total>0&&!isPaid(r.e.id));
-    if(aPayer.length===0){ alert("Aucun employé à payer (déjà payés ou montant nul)."); return; }
-    // Protection année clôturée
-    const payYear=(month||"").slice(0,4);
-    const anneeClose=(db.yearClosures||[]).some(c=>c.year===payYear);
-    if(anneeClose){
-      if(!canEditClosedYear(db,user)){ alert(`L'année ${payYear} est clôturée. Vous ne pouvez pas enregistrer des salaires sur cette période.`); return; }
-      if(!warnClosedYear(payYear)) return;
-    }
-    mutate(d=>{
-      if(!d.salaryRuns) d.salaryRuns=[];
-      // Pas de dépense automatique — la sortie de caisse est saisie manuellement par la direction
-      d.salaryRuns.push({
-        id:uid("run"), month, at:nowISO(), by:user?.name||user?.login||"",
-        items:aPayer.map(r=>({empId:r.e.id,name:r.e.name,amount:Math.round(r.total)})),
-        expenseIds:[]
-      });
-    });
-    const totalPaie=aPayer.reduce((s,r)=>s+(r.total||0),0);
-    sendTelegram(`💵 <b>Paie validée</b>\nMois: ${prettyMonth(month)} — ${aPayer.length} employé(s)\nMontant total: ${fcfa(totalPaie)}`, "salary");
-    setPayOpen(false);
-  };
-
-  // Annule une paie : supprime les dépenses créées et retire l'entrée
-  const annulerPaie=(runId)=>{
-    const run=(db.salaryRuns||[]).find(r=>r.id===runId);
-    if(!run) return;
-    if(!confirm(`Annuler la paie de ${prettyMonth(month)} (${run.items.length} employé(s), ${fcfa(run.items.reduce((s,i)=>s+i.amount,0))}) ? Les bulletins archivés seront supprimés et les employés repasseront à "non payé" ce mois.`)) return;
-    mutate(d=>{
-      d.expenses=d.expenses.filter(e=>!run.expenseIds.includes(e.id));
-      d.salaryRuns=d.salaryRuns.filter(r=>r.id!==runId);
-    });
-  };
-
-  const setAppr=(eid,status,approvedHours)=>mutate(d=>{ d.overtimeApprovals[`${eid}-${month}`]={status,approvedHours}; });
-  const clearAppr=(eid)=>mutate(d=>{ delete d.overtimeApprovals[`${eid}-${month}`]; });
-
-  // Impression : bulletin de salaire individuel
-  const printPayslip=(r)=>{
-    const lignes=[
-      ["Salaire de base", r.base],
-      r.commission?["Commissions sur ventes", Math.round(r.commission)]:null,
-      r.otPay?[`Heures supplémentaires (${fmtHours(r.approvedHours)} × ${fcfa(Math.round(r.hourlyRate))})`, r.otPay]:null,
-    ].filter(Boolean);
-    const body=`
-      <table style="margin-bottom:14px;">
-        <tr><td style="width:40%"><b>Employé</b></td><td>${esc(r.e.name)}</td></tr>
-        <tr><td><b>Rôle</b></td><td>${esc(roleLabelOf(db,r.e.role))}</td></tr>
-        <tr><td><b>Affectation</b></td><td>${esc(assignmentLabel(db,r.e))}</td></tr>
-        <tr><td><b>Période</b></td><td>${esc(prettyMonth(month))}</td></tr>
-        ${r.e.hireDate?`<tr><td><b>Date d'embauche</b></td><td>${esc(r.e.hireDate)}</td></tr>`:""}
-      </table>
-      <div class="rows">
-        ${lignes.map(([l,v])=>`<div class="line"><span>${l}</span><b class="mono">${esc(fcfa(v))}</b></div>`).join("")}
-        <div class="line total"><span>NET À PAYER</span><span class="mono">${esc(fcfa(r.total))}</span></div>
-      </div>
-      <p class="small muted" style="margin-top:14px;">Heures effectuées sur la période : ${fmtHours(r.hours)} · Seuil mensuel : ${fmtHours(r.threshold)}.</p>`;
-    printDocument({title:"Bulletin de salaire",subtitle:r.e.name,scope:scopeLabel,period:periodLabel,body,signatures:["L'employé(e)","La direction"]});
-  };
-  // Impression : bulletins individuels (un par page). Par défaut tous ; sinon la liste fournie (filtrée).
-  const printAllPayslips=(listToPrint)=>{
-    const bulletins = (Array.isArray(listToPrint) && listToPrint.length) ? listToPrint : rows;
-    const win=window.open("","_blank");
-    if(!win){ alert("Veuillez autoriser les fenêtres pop-up pour imprimer."); return; }
-    const unBulletin=(r)=>{
-      const lignes=[
-        ["Salaire de base", r.base],
-        r.commission?["Commissions sur ventes", Math.round(r.commission)]:null,
-        r.otPay?[`Heures supplémentaires (${fmtHours(r.approvedHours)} × ${fcfa(Math.round(r.hourlyRate))})`, r.otPay]:null,
-      ].filter(Boolean);
-      return `
-      <div class="payslip">
-        <div class="ps-head">
-          <div class="ps-brand"><img src="${GX_LOGO}" alt="GX" class="ps-mark" style="width:44px;height:44px;border-radius:50%;object-fit:cover;"/><div><div class="ps-company">GENERATION X</div><div class="ps-tag">Bulletin de salaire · ${esc(prettyMonth(month))}</div></div></div>
-          <div class="ps-meta doc-muted">${esc(scopeLabel)}<br/>${esc(today())}</div>
-        </div>
-        <table style="margin-bottom:14px;">
-          <tr><td style="width:40%"><b>Employé</b></td><td>${esc(r.e.name)}</td></tr>
-          <tr><td><b>Rôle</b></td><td>${esc(roleLabelOf(db,r.e.role))}</td></tr>
-          <tr><td><b>Affectation</b></td><td>${esc(assignmentLabel(db,r.e))}</td></tr>
-          <tr><td><b>Période</b></td><td>${esc(prettyMonth(month))}</td></tr>
-          ${r.e.hireDate?`<tr><td><b>Date d'embauche</b></td><td>${esc(r.e.hireDate)}</td></tr>`:""}
-        </table>
-        <div class="rows">
-          ${lignes.map(([l,v])=>`<div class="line"><span>${l}</span><b class="mono">${esc(fcfa(v))}</b></div>`).join("")}
-          <div class="line total"><span>NET À PAYER</span><span class="mono">${esc(fcfa(r.total))}</span></div>
-        </div>
-        <p class="small muted" style="margin-top:14px;">Heures effectuées sur la période : ${fmtHours(r.hours)} · Seuil mensuel : ${fmtHours(r.threshold)}.</p>
-        <div class="sig-row">
-          <div class="sig-col"><div class="sig-line"></div><div class="sig-label">L'employé(e)</div></div>
-          <div class="sig-col"><div class="sig-line"></div><div class="sig-label">La direction</div></div>
-        </div>
-      </div>`;
-    };
-    const tousBulletins=bulletins.map(unBulletin).join("");
-    const html=`<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8"><title>Bulletins de paie — ${esc(prettyMonth(month))} — GENERATION X</title>
-    <style>
-      @page { size: A4; margin: 14mm 14mm; }
-      *{box-sizing:border-box;}
-      body{font-family:'Helvetica Neue',Arial,sans-serif;color:#0B1A2A;font-size:11pt;line-height:1.5;margin:0;}
-      .payslip{page-break-after:always;padding-bottom:10px;}
-      .payslip:last-child{page-break-after:auto;}
-      .ps-head{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:3px solid #0E7C66;padding-bottom:12px;margin-bottom:16px;}
-      .ps-brand{display:flex;gap:12px;align-items:center;}
-      .ps-mark{width:46px;height:46px;border-radius:11px;background:#0E7C66;color:#fff;font-weight:800;font-size:19px;display:flex;align-items:center;justify-content:center;letter-spacing:-1px;}
-      .ps-company{font-size:18pt;font-weight:800;letter-spacing:-0.5px;line-height:1;}
-      .ps-tag{font-size:9pt;color:#6B7785;margin-top:3px;}
-      .ps-meta{text-align:right;font-size:9.5pt;}
-      table{width:100%;border-collapse:collapse;margin:10px 0;font-size:9.5pt;}
-      td{padding:6px 9px;border-bottom:1px solid #E2DED5;}
-      .rows{margin:10px 0;}
-      .line{display:flex;justify-content:space-between;padding:7px 0;border-bottom:1px solid #eee;}
-      .line.total{border-top:2px solid #0B1A2A;border-bottom:none;font-weight:800;font-size:12pt;margin-top:6px;padding-top:10px;}
-      .right{text-align:right;} .mono{font-variant-numeric:tabular-nums;}
-      .muted,.doc-muted{color:#6B7785;} .small{font-size:9pt;}
-      .sig-row{display:flex;gap:30px;margin-top:38px;}
-      .sig-col{flex:1;} .sig-line{border-top:1px solid #0B1A2A;margin-top:34px;} .sig-label{font-size:8.5pt;color:#6B7785;margin-top:4px;}
-      @media print{ .no-print{display:none;} body{-webkit-print-color-adjust:exact;print-color-adjust:exact;} }
-    </style></head><body>
-      ${tousBulletins}
-      <div class="no-print" style="text-align:center;margin-top:18px;">
-        <button onclick="window.print()" style="background:#0E7C66;color:#fff;border:none;padding:10px 22px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;">Imprimer / Enregistrer en PDF</button>
-      </div>
-      <`+`script>window.onload=function(){setTimeout(function(){window.print();},400);};<\/script>
-    </body></html>`;
-    win.document.write(html);
-    win.document.close();
-  };
-  // Impression : journal de paie (tous les bulletins du mois)
-  const printJournal=()=>{
+  const printJournal=(list)=>{
+    const l=Array.isArray(list)&&list.length?list:rows;
+    const tR=l.reduce((s,r)=>s+r.rev,0);
+    const tC=l.reduce((s,r)=>s+r.commission,0);
     const body=`
       <div class="kpis">
-        <div class="kpi"><div class="l">Salaires fixes</div><div class="v">${esc(fcfa(tot.base))}</div></div>
-        <div class="kpi"><div class="l">Commissions</div><div class="v">${esc(fcfa(tot.commission))}</div></div>
-        <div class="kpi"><div class="l">Heures sup.</div><div class="v">${esc(fcfa(tot.ot))}</div></div>
-        <div class="kpi"><div class="l">Total</div><div class="v">${esc(fcfa(tot.total))}</div></div>
+        <div class="kpi"><div class="l">Total recettes</div><div class="v">${esc(fcfa(tR))}</div></div>
+        <div class="kpi"><div class="l">Total commissions</div><div class="v">${esc(fcfa(tC))}</div></div>
       </div>
       <table>
-        <thead><tr><th>Employé</th><th>Rôle</th><th>Affectation</th><th class="right">Fixe</th><th class="right">Commission</th><th class="right">H. sup</th><th class="right">Net à payer</th></tr></thead>
-        <tbody>${rows.map(r=>`<tr><td><b>${esc(r.e.name)}</b></td><td>${esc(roleLabelOf(db,r.e.role))}</td><td>${esc(assignmentLabel(db,r.e))}</td><td class="right mono">${esc(fcfa(r.base))}</td><td class="right mono">${r.commission?esc(fcfa(Math.round(r.commission))):"—"}</td><td class="right mono">${r.otPay?esc(fcfa(r.otPay)):"—"}</td><td class="right mono"><b>${esc(fcfa(r.total))}</b></td></tr>`).join("")}</tbody>
-        <tfoot><tr><td colspan="3">TOTAL</td><td class="right mono">${esc(fcfa(tot.base))}</td><td class="right mono">${esc(fcfa(tot.commission))}</td><td class="right mono">${esc(fcfa(tot.ot))}</td><td class="right mono">${esc(fcfa(tot.total))}</td></tr></tfoot>
+        <thead><tr><th>Vendeur</th><th>Affectation</th><th class="right">Recettes</th><th class="right">Taux</th><th class="right">Commission</th></tr></thead>
+        <tbody>${l.map(r=>`<tr><td><b>${esc(r.e.name)}</b></td><td>${esc(assignmentLabel(db,r.e))}</td><td class="right mono">${esc(fcfa(r.rev))}</td><td class="right mono">${((commissionRateOf(r.e)||0)*100).toFixed(1)}%</td><td class="right mono"><b>${esc(fcfa(r.commission))}</b></td></tr>`).join("")}</tbody>
+        <tfoot><tr><td colspan="2">TOTAL</td><td class="right mono">${esc(fcfa(tR))}</td><td></td><td class="right mono">${esc(fcfa(tC))}</td></tr></tfoot>
       </table>`;
-    printDocument({title:"Journal de paie",subtitle:`${rows.length} employé(s)`,scope:scopeLabel,period:periodLabel,body,signatures:["Préparé par","Approuvé par"]});
-  };
-  // Impression : récapitulatif des employés FILTRÉS (liste sur une page, selon la recherche/filtres)
-  const printJournalFiltered=(filtered)=>{
-    const list=Array.isArray(filtered)&&filtered.length?filtered:rows;
-    const t=list.reduce((a,r)=>({base:a.base+r.base,commission:a.commission+r.commission,ot:a.ot+r.otPay,total:a.total+r.total}),{base:0,commission:0,ot:0,total:0});
-    const body=`
-      <div class="kpis">
-        <div class="kpi"><div class="l">Salaires fixes</div><div class="v">${esc(fcfa(t.base))}</div></div>
-        <div class="kpi"><div class="l">Commissions</div><div class="v">${esc(fcfa(t.commission))}</div></div>
-        <div class="kpi"><div class="l">Heures sup.</div><div class="v">${esc(fcfa(t.ot))}</div></div>
-        <div class="kpi"><div class="l">Total</div><div class="v">${esc(fcfa(t.total))}</div></div>
-      </div>
-      <table>
-        <thead><tr><th>Employé</th><th>Rôle</th><th>Affectation</th><th class="right">Fixe</th><th class="right">Commission</th><th class="right">H. sup</th><th class="right">Net à payer</th></tr></thead>
-        <tbody>${list.map(r=>`<tr><td><b>${esc(r.e.name)}</b></td><td>${esc(roleLabelOf(db,r.e.role))}</td><td>${esc(assignmentLabel(db,r.e))}</td><td class="right mono">${esc(fcfa(r.base))}</td><td class="right mono">${r.commission?esc(fcfa(Math.round(r.commission))):"—"}</td><td class="right mono">${r.otPay?esc(fcfa(r.otPay)):"—"}</td><td class="right mono"><b>${esc(fcfa(r.total))}</b></td></tr>`).join("")}</tbody>
-        <tfoot><tr><td colspan="3">TOTAL</td><td class="right mono">${esc(fcfa(t.base))}</td><td class="right mono">${esc(fcfa(t.commission))}</td><td class="right mono">${esc(fcfa(t.ot))}</td><td class="right mono">${esc(fcfa(t.total))}</td></tr></tfoot>
-      </table>`;
-    printDocument({title:"Récapitulatif de paie (filtré)",subtitle:`${list.length} employé(s)`,scope:scopeLabel,period:periodLabel,body,signatures:["Préparé par","Approuvé par"]});
+    printDocument({title:"Commissions vendeurs",subtitle:`${l.length} vendeur(s)`,scope:scopeLabel,period:periodLabel,body,signatures:["Préparé par","Approuvé par"]});
   };
 
   return (
@@ -8930,119 +8873,69 @@ function Payroll(){
             ))}
           </div>
           {gran==="month" && <div className="row" style={{gap:6,alignItems:"center"}}>
-            <button className="btn sm ghost" title="Mois précédent" onClick={()=>setMonth(prevMonthKey(month))}>‹</button>
+            <button className="btn sm ghost" onClick={()=>setMonth(prevMonthKey(month))}>‹</button>
             <select style={{padding:"8px 10px",borderRadius:9,border:"1px solid var(--line)"}} value={month} onChange={e=>setMonth(e.target.value)}>{[...new Set([...months,month])].sort().reverse().map(m=><option key={m} value={m}>{prettyMonth(m)}</option>)}</select>
-            <button className="btn sm ghost" title="Mois suivant" onClick={()=>setMonth(nextMonthKey(month))}>›</button>
+            <button className="btn sm ghost" onClick={()=>setMonth(nextMonthKey(month))}>›</button>
           </div>}
           {gran==="week" && <div className="row" style={{gap:6,alignItems:"center"}}>
-            <button className="btn sm ghost" title="Semaine précédente" onClick={()=>{const r=rangeFromWeekKey(week);const d=new Date(r.start+"T00:00:00");d.setDate(d.getDate()-7);setWeek(weekKey(d.toISOString().slice(0,10)));}}>‹</button>
+            <button className="btn sm ghost" onClick={()=>{const r=rangeFromWeekKey(week);const d=new Date(r.start+"T00:00:00");d.setDate(d.getDate()-7);setWeek(weekKey(d.toISOString().slice(0,10)));}}>‹</button>
             <select style={{padding:"8px 10px",borderRadius:9,border:"1px solid var(--line)",minWidth:190}} value={week} onChange={e=>setWeek(e.target.value)}>{weeksAvail.map(w=><option key={w} value={w}>{weekLabelFull(w)}</option>)}</select>
-            <button className="btn sm ghost" title="Semaine suivante" onClick={()=>{const r=rangeFromWeekKey(week);const d=new Date(r.start+"T00:00:00");d.setDate(d.getDate()+7);setWeek(weekKey(d.toISOString().slice(0,10)));}}>›</button>
+            <button className="btn sm ghost" onClick={()=>{const r=rangeFromWeekKey(week);const d=new Date(r.start+"T00:00:00");d.setDate(d.getDate()+7);setWeek(weekKey(d.toISOString().slice(0,10)));}}>›</button>
           </div>}
           {gran==="year" && <select style={{padding:"8px 10px",borderRadius:9,border:"1px solid var(--line)"}} value={year} onChange={e=>setYear(e.target.value)}>{yearsAvail.map(y=><option key={y} value={y}>{y}</option>)}</select>}
         </div>
-        <div className="row" style={{gap:10,alignItems:"center"}}>
-          <span className="hint muted">Masse salariale · {periodLabel}</span>
-          <PrintButton sm ghost label="Tous les bulletins" onClick={printAllPayslips}/>
-          <PrintButton sm label="Imprimer le journal" onClick={printJournal}/>
-          {canPaySalaries && <button className="btn accent" onClick={()=>setPayOpen(true)}>💰 Enregistrer la paie</button>}
-        </div>
+        <PrintButton sm label="Imprimer" onClick={()=>printJournal(rows)}/>
       </div>
 
-      {pendingCount>0 && (
-        <div className="box warn" style={{background:"#fdf3e3",borderLeft:"4px solid var(--accent)",borderRadius:"0 8px 8px 0",padding:"12px 14px"}}>
-          <b style={{color:"#c0641f"}}>{pendingCount} validation(s) d'heures supplémentaires en attente.</b> Les heures sup ne sont ajoutées au bulletin qu'une fois approuvées.
-        </div>
-      )}
-
       <div className="card">
-        <div className="card-pad sec-title"><h2>Heures supplémentaires — {prettyMonth(month)}</h2><span className="hint">Seuil légal puis validation avant paie</span></div>
-        <div style={{overflowX:"auto"}}><table>
-          <thead><tr><th>Employé</th><th className="right">Heures faites</th><th className="right">Seuil</th><th className="right">Heures sup</th><th className="right">Taux horaire</th><th className="right">Montant</th><th>Validation</th></tr></thead>
-          <tbody>{rows.filter(r=>r.base>0).map(r=>(
-            <tr key={r.e.id}>
-              <td><b>{r.e.name}</b><div className="muted" style={{fontSize:12}}>{assignmentLabel(db,r.e)}</div></td>
-              <td className="right mono">{fmtHours(r.hours)}</td>
-              <td className="right mono">{fmtHours(r.threshold)}</td>
-              <td className="right mono">{r.otHoursRaw>0?<b style={{color:"var(--accent)"}}>{fmtHours(r.otHoursRaw)}</b>:"—"}</td>
-              <td className="right mono">{r.hourlyRate?fcfa(Math.round(r.hourlyRate))+"/h":"—"}</td>
-              <td className="right mono">{r.status==="approved"?<b style={{color:"var(--gold)"}}>{fcfa(r.otPay)}</b>:r.otHoursRaw>0?<span className="muted">{fcfa(Math.round(r.otHoursRaw*r.hourlyRate))}</span>:"—"}</td>
-              <td><OvertimeControls r={r} onApprove={(h)=>setAppr(r.e.id,"approved",h)} onReject={()=>setAppr(r.e.id,"rejected",0)} onReset={()=>clearAppr(r.e.id)}/></td>
-            </tr>
-          ))}</tbody>
-        </table></div>
-      </div>
-
-      {runsThisMonth.length>0 && (
-        <div className="card" style={{borderLeft:"4px solid var(--brand)"}}>
-          <div className="card-pad">
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-              <b style={{color:"var(--brand)"}}>✓ Paie enregistrée — {prettyMonth(month)}</b>
-              <span className="muted" style={{fontSize:13}}>{paidEmpIds.size} employé(s) payé(s)</span>
-            </div>
-            {runsThisMonth.map(run=>(
-              <div key={run.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 10px",background:"var(--paper)",borderRadius:8,marginBottom:6,fontSize:13}}>
-                <span>{run.items.length} employé(s) · <b className="mono">{fcfa(run.items.reduce((s,i)=>s+i.amount,0))}</b> <span className="muted">· {run.at?.slice(0,10)}{run.by?` · par ${run.by}`:""}</span></span>
-                {canCancelSalaries && <button className="btn sm ghost danger" onClick={()=>annulerPaie(run.id)}>↩ Annuler</button>}
-              </div>
-            ))}
-            <p className="help muted" style={{marginTop:4}}>Ces paiements ont créé des dépenses de catégorie « Salaires » qui ont diminué la caisse de chaque niveau. L'annulation les supprime et recrédite la caisse.</p>
-          </div>
-        </div>
-      )}
-
-      <div className="card">
-        <div className="card-pad sec-title"><h2>Bulletins — {prettyMonth(month)}</h2></div>
-        <div className="card-pad" style={{paddingTop:0}}>
+        <div className="card-pad" style={{paddingBottom:0}}>
         <SearchBar
           items={rows}
-          searchText={r=>`${r.e.name} ${roleLabelOf(db,r.e.role)} ${assignmentLabel(db,r.e)}`}
-          placeholder="🔍 Rechercher un bulletin (nom de l'employé…)"
+          searchText={r=>`${r.e.name} ${assignmentLabel(db,r.e)}`}
+          placeholder="🔍 Rechercher un vendeur…"
           filters={[
-            {key:"role",label:"Rôle",options:ROLES.map(x=>({v:x.v,l:x.l})),match:(r,v)=>r.e.role===v},
-            {key:"annexe",label:"Affectation",options:db.annexes.map(a=>({v:a.id,l:a.code})),match:(r,v)=>r.e.assignmentId===v},
-            {key:"type",label:"Type",options:[{v:"fixe",l:"Salaire fixe"},{v:"comm",l:"Commission"}],match:(r,v)=>v==="fixe"?r.base>0:r.commission>0},
+            {key:"annexe",label:"Affectation",options:[
+              ...db.annexes.map(a=>({v:a.id,l:a.code||a.name})),
+              ...(db.succursales||[]).map(s=>{const a=db.annexes.find(x=>x.id===s.annexeId);return {v:s.id,l:(a?.code||"")+" › "+(s.code||s.name)};})
+            ],match:(r,v)=>{
+              const e=r.e;
+              if(e.level==="custom"&&Array.isArray(e.annexeIds)) return e.annexeIds.includes(v);
+              if(e.succursaleId) return e.succursaleId===v||e.assignmentId===v;
+              return e.assignmentId===v;
+            }},
           ]}>
         {(filtered)=>{
-          const ft=filtered.reduce((a,r)=>({base:a.base+r.base,commission:a.commission+r.commission,ot:a.ot+r.otPay,total:a.total+r.total}),{base:0,commission:0,ot:0,total:0});
-          return (
-          <div style={{overflowX:"auto"}}>
+          const fR=filtered.reduce((s,r)=>s+r.rev,0);
+          const fC=filtered.reduce((s,r)=>s+r.commission,0);
+          return (<div style={{overflowX:"auto"}}>
           <div className="row" style={{marginBottom:12}}>
-            <KPI label="Salaires fixes" value={fcfa(ft.base)}/>
-            <KPI label="Commissions" value={fcfa(ft.commission)} accent="var(--accent)"/>
-            <KPI label="Heures sup. payées" value={fcfa(ft.ot)} accent="var(--gold)"/>
-            <KPI label="Masse salariale" value={fcfa(ft.total)} accent="var(--brand)"/>
+            <KPI label="Total recettes" value={fcfa(fR)}/>
+            <KPI label="Total commissions" value={fcfa(fC)} accent="var(--accent)"/>
           </div>
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8,marginBottom:10}}>
-            <span className="muted" style={{fontSize:13}}>{filtered.length} bulletin{filtered.length>1?"s":""} affiché{filtered.length>1?"s":""} · {periodLabel}</span>
-            <div className="row" style={{gap:8,flexWrap:"wrap"}}>
-              <button className="btn sm ghost" onClick={()=>printJournalFiltered(filtered)} disabled={filtered.length===0} title="Imprimer la liste récapitulative des employés affichés (un tableau sur une page)">⎙ Récapitulatif filtré</button>
-              <button className="btn sm" onClick={()=>printAllPayslips(filtered)} disabled={filtered.length===0} title="Imprimer les bulletins individuels des employés affichés (un bulletin par page)">⎙ Bulletins filtrés</button>
-            </div>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+            <span className="muted" style={{fontSize:13}}>{filtered.length} vendeur{filtered.length>1?"s":""} · {periodLabel}</span>
+            <button className="btn sm ghost" onClick={()=>printJournal(filtered)} disabled={filtered.length===0}>⎙ Imprimer la sélection</button>
           </div>
           <table>
-          <thead><tr><th>Employé</th><th>Rôle</th><th>Affectation</th><th className="right">Fixe</th><th className="right">Commission</th><th className="right">Heures sup</th><th className="right">Net à payer</th><th></th></tr></thead>
-          <tbody>{filtered.map(r=>(
-            <tr key={r.e.id}>
-              <td><b>{r.e.name}</b></td><td><RoleTag role={r.e.role}/></td>
-              <td><span className="chip">{assignmentLabel(db,r.e)}</span></td>
-              <td className="right mono">{fcfa(r.base)}</td>
-              <td className="right mono" style={{color:r.commission?"var(--accent)":"var(--muted)"}}>{r.commission?fcfa(r.commission):"—"}</td>
-              <td className="right mono" style={{color:r.otPay?"var(--gold)":"var(--muted)"}}>{r.otPay?fcfa(r.otPay):(r.status==="pending"?<span className="tag gold">en attente</span>:"—")}</td>
-              <td className="right mono"><b>{fcfa(r.total)}</b></td>
-              <td className="right"><button className="btn sm ghost" onClick={()=>printPayslip(r)} title="Imprimer le bulletin">⎙</button></td>
-            </tr>
-          ))}
-          {filtered.length===0&&<tr><td colSpan={8} className="muted" style={{textAlign:"center",padding:16}}>Aucun bulletin ne correspond.</td></tr>}
-          </tbody>
-          <tfoot><tr style={{background:"#fbfaf7",fontWeight:700}}><td colSpan={3}>TOTAL</td><td className="right mono">{fcfa(ft.base)}</td><td className="right mono">{fcfa(ft.commission)}</td><td className="right mono">{fcfa(ft.ot)}</td><td className="right mono">{fcfa(ft.total)}</td><td></td></tr></tfoot>
-        </table></div>
-        );}}
+            <thead><tr><th>Vendeur</th><th>Affectation</th><th className="right">Recettes</th><th className="right">Taux</th><th className="right">Commission</th></tr></thead>
+            <tbody>{filtered.map(r=>(
+              <tr key={r.e.id}>
+                <td><b>{r.e.name}</b></td>
+                <td><span className="chip">{assignmentLabel(db,r.e)}</span></td>
+                <td className="right mono">{fcfa(r.rev)}</td>
+                <td className="right mono">{((commissionRateOf(r.e)||0)*100).toFixed(1)}%</td>
+                <td className="right mono" style={{color:r.commission?"var(--accent)":"var(--muted)"}}><b>{r.commission?fcfa(r.commission):"—"}</b></td>
+              </tr>
+            ))}
+            {filtered.length===0&&<tr><td colSpan={5} className="muted" style={{textAlign:"center",padding:16}}>Aucun vendeur trouvé.</td></tr>}
+            </tbody>
+            <tfoot><tr style={{fontWeight:700}}><td colSpan={2}>TOTAL</td><td className="right mono">{fcfa(fR)}</td><td></td><td className="right mono">{fcfa(fC)}</td></tr></tfoot>
+          </table>
+          </div>);
+        }}
         </SearchBar>
         </div>
       </div>
-
-      {payOpen && <PayrollModal rows={rows} month={month} isPaid={isPaid} onConfirm={enregistrerPaie} onClose={()=>setPayOpen(false)}/>}
     </div>
   );
 }
@@ -9500,7 +9393,7 @@ function MissionModal({mission,onClose}){
   const [err,setErr]=useState("");
   const upd=k=>e=>setF(p=>({...p,[k]:e.target.value}));
 
-  const agents=(db.employees||[]).filter(e=>e.active!==false);
+  const agents=(db.employees||[]).filter(e=>e.active!==false&&e.role!=="vendeur");
   const subs=(db.subsidiaries||[]).filter(s=>s.active!==false);
   const annexes=(db.annexes||[]).filter(a=>!f.subsidiaryId||a.subsidiaryId===f.subsidiaryId);
 
@@ -9636,6 +9529,8 @@ function MissionDetailModal({mission:m,onClose}){
   const canValidate=hasPerm(db,user,"do:mission_validate");
   const canClose=hasPerm(db,user,"do:mission_close");
   const canDelete=hasPerm(db,user,"do:mission_delete");
+  const isAdmin=user?.role==="admin";
+  const canEditHistory=isAdmin||hasPerm(db,user,"do:mission_validate")||hasPerm(db,user,"do:mission_close");
   const [edit,setEdit]=useState(false);
   const [startTime,setStartTime]=useState(m.startedAt?.slice(0,16)||nowISO().slice(0,16));
   const [endTime,setEndTime]=useState(m.endedAt?.slice(0,16)||nowISO().slice(0,16));
@@ -9671,7 +9566,7 @@ function MissionDetailModal({mission:m,onClose}){
         {m.urgent&&<span className="tag gold">⚡ Urgente</span>}
         {m.rating&&<span style={{fontSize:16}}>{"⭐".repeat(m.rating)}</span>}
         <span style={{marginLeft:"auto",display:"flex",gap:6}}>
-          {m.status!=="closed"&&m.status!=="cancelled"&&<button className="btn sm ghost" onClick={()=>setEdit(true)}>✎ Modifier</button>}
+          {(m.status!=="closed"&&m.status!=="cancelled"||canEditHistory)&&<button className="btn sm ghost" onClick={()=>setEdit(true)}>✎ Modifier</button>}
           {m.status!=="cancelled"&&m.status!=="closed"&&<button className="btn sm ghost" style={{color:"var(--danger)"}} onClick={doCancel}>Annuler</button>}
           {canDelete&&<button className="btn sm ghost" style={{color:"var(--danger)"}} onClick={()=>{
             if(!confirm(`Supprimer définitivement la mission "${m.title}" ?\nCette action est irréversible.`)) return;
@@ -9809,7 +9704,7 @@ function MissionDetailModal({mission:m,onClose}){
 
 /* Composant principal Missions */
 function Missions(){
-  const {db,user,subById,annexeById,nav,userScope}=useApp();
+  const {db,user,subById,annexeById,nav,userScope,scopedAnnexeIds,scopedSubIds}=useApp();
   const isAdmin=user?.role==="admin";
   const canCreate=hasPerm(db,user,"do:mission_create")||isAdmin;
   const canValidate=hasPerm(db,user,"do:mission_validate");
@@ -9821,22 +9716,29 @@ function Missions(){
   const [q,setQ]=useState("");
   const [tab,setTab]=useState("active"); // active | history
 
-  // Filtre périmètre : missions dont au moins un agent appartient au périmètre
+  // Filtre périmètre réactif au nav : missions dont au moins un agent appartient au périmètre
   const scopeEmpIds = useMemo(()=>{
-    if(isAdmin||user?.level==="holding") return null; // null = tout visible
-    const scopeAnx=userScope.annexes||[];
-    const scopeSuc=userScope.sucIds||[];
+    if(nav.level==="holding") return null; // null = tout visible
+    const navAnx=scopedAnnexeIds||[];
+    const navSuc=nav.level==="succursale"?[nav.id]:(db.succursales||[]).filter(s=>navAnx.includes(s.annexeId)).map(s=>s.id);
     return (db.employees||[]).filter(e=>{
-      if(scopeAnx.includes(e.assignmentId||e.annexeId)) return true;
-      if(e.succursaleId && scopeSuc.includes(e.succursaleId)) return true;
+      if(navAnx.includes(e.assignmentId||e.annexeId)) return true;
+      if(e.succursaleId && navSuc.includes(e.succursaleId)) return true;
+      if(e.annexeIds && e.annexeIds.some(aid=>navAnx.includes(aid))) return true;
       return false;
     }).map(e=>e.id);
-  },[db,user,userScope]);
+  },[db,nav,scopedAnnexeIds]);
 
   const missions=(db.missions||[]).filter(m=>{
-    if(scopeEmpIds===null) return true;
-    const agents=(m.agentIds||[m.agentId]).filter(Boolean);
-    return agents.some(id=>scopeEmpIds.includes(id));
+    if(nav.level==="holding") return true;
+    // Filtrer par subsidiaryId et annexeId de la mission (champs "Filiale concernée" et "Annexe concernée")
+    if(nav.level==="subsidiary") return m.subsidiaryId===nav.id;
+    if(nav.level==="annexe") return m.annexeId===nav.id;
+    if(nav.level==="succursale"){
+      const suc=(db.succursales||[]).find(s=>s.id===nav.id);
+      return suc&&m.annexeId===suc.annexeId;
+    }
+    return true;
   }).sort((a,b)=>(b.createdAt||"").localeCompare(a.createdAt||""));
   const active=missions.filter(m=>!["closed","cancelled"].includes(m.status));
   const history=missions.filter(m=>["closed","cancelled"].includes(m.status));
@@ -10666,7 +10568,7 @@ function PartnerDivRow({p,dividend,paid,canPayDividend,canViewReleve,payDividend
         </td>
         {canPayDividend&&<td onClick={e=>e.stopPropagation()} style={{display:"flex",gap:4,flexWrap:"wrap"}}>
           <button className="btn sm ghost" onClick={e=>{e.stopPropagation();setShowRel(x=>!x);}}>📄 Relevé</button>
-          {!paid&&netProfit>0?<button className="btn sm" style={{background:"#1E875F"}} onClick={e=>{e.stopPropagation();payDividend(p);}}>💎 Payer</button>
+          {!paid&&netProfit>0?<button className="btn sm" style={{background:"#1E875F"}} onClick={e=>{e.stopPropagation();payDividend(p,Math.round(totalZoneDividend));}}>💎 Payer</button>
           :paid?<button className="btn sm ghost" onClick={e=>{e.stopPropagation();printDividend(p,paid.dividend,paid.ref);}}>⎙ Bulletin</button>
           :<span className="muted" style={{fontSize:11}}>Bénéfice nul</span>}
         </td>}
@@ -10714,7 +10616,8 @@ function PartnerDivRow({p,dividend,paid,canPayDividend,canViewReleve,payDividend
 
 
 function Investisseurs(){
-  const {db,mutate,user,nav}=useApp();
+  const {db,mutate,user,nav,scopedAnnexeIds,scopedSubIds}=useApp();
+
   const canManagePartner=hasPerm(db,user,"do:inv_manage")||hasPerm(db,user,"do:partner_manage")||user.role==="admin";
   const canPayDividend=hasPerm(db,user,"do:inv_pay")||hasPerm(db,user,"do:dividend_pay")||user.role==="admin";
   const canManageRevenue=hasPerm(db,user,"do:inv_revenue")||hasPerm(db,user,"do:revenue_manage")||user.role==="admin";
@@ -10804,16 +10707,60 @@ function Investisseurs(){
     );
   };
   const calcMonth=divDate.slice(0,7);
+  // Périmètre nav réactif
+  const _navAnx = scopedAnnexeIds||[];
+  const _navSucIds = nav.level==="succursale"?[nav.id]:(db.succursales||[]).filter(s=>_navAnx.includes(s.annexeId)).map(s=>s.id);
+  const inNavRev=(r)=>{
+    if(nav.level==="holding") return true;
+    const aid=r.annexeId;
+    // Recette sans entité → visible au niveau subsidiary et au-dessus uniquement
+    if(!aid){
+      if(nav.level==="subsidiary") return true;
+      if(nav.level==="annexe") return true;
+      return false; // au niveau succursale, les recettes sans entité ne sont pas de cette succursale
+    }
+    // aid peut être : subsidiary, annexe ou succursale
+    const suc=(db.succursales||[]).find(s=>s.id===aid);
+    if(suc){
+      // c'est une succursale
+      if(nav.level==="succursale") return nav.id===aid;
+      return _navSucIds.includes(aid)||_navAnx.includes(suc.annexeId);
+    }
+    const anx=(db.annexes||[]).find(a=>a.id===aid);
+    if(anx){
+      // c'est une annexe directe
+      if(nav.level==="succursale"){
+        // au niveau succursale, inclure les recettes de l'annexe parente aussi
+        return _navAnx.includes(aid);
+      }
+      return _navAnx.includes(aid);
+    }
+    // c'est peut-être un subsidiary (groupe)
+    const sub=(db.subsidiaries||[]).find(s=>s.id===aid);
+    if(sub){
+      return (scopedSubIds||[]).includes(aid);
+    }
+    return false;
+  };
+  const inNavExp=(e)=>{
+    if(nav.level==="holding") return true;
+    if(e.annexeId){
+      const suc=(db.succursales||[]).find(s=>s.id===e.annexeId);
+      const anx=suc?suc.annexeId:e.annexeId;
+      return _navSucIds.includes(e.annexeId)||_navAnx.includes(anx);
+    }
+    return (scopedSubIds||[]).includes(e.subsidiaryId);
+  };
 
-  // Recettes du mois sélectionné (mois calendaire réel)
+  // Recettes du mois sélectionné (mois calendaire réel) filtrées par périmètre nav
   const monthRevenues=(db.partnerRevenues||[])
-    .filter(r=>inPeriodDate(r.date,divGran,divDate,divDateTo))
+    .filter(r=>inPeriodDate(r.date,divGran,divDate,divDateTo)&&inNavRev(r))
     .sort((a,b)=>(b.date||"").localeCompare(a.date||""));
   const totalRevenue=monthRevenues.reduce((s,r)=>s+(Number(r.amount)||0),0);
 
-  // Dépenses du même périmètre
+  // Dépenses du même périmètre nav
   const monthExpenses=(db.expenses||[])
-    .filter(e=>inPeriodDate(e.date,divGran,divDate,divDateTo))
+    .filter(e=>inPeriodDate(e.date,divGran,divDate,divDateTo)&&inNavExp(e))
     .reduce((s,e)=>s+(Number(e.amount)||0),0);
 
   const netProfit=totalRevenue-monthExpenses;
@@ -10838,12 +10785,43 @@ function Investisseurs(){
 
   // Recettes filtrées
   // revAnnexe peut être l'id d'une filiale (annexe) OU d'une succursale directement
-  const _revAnnexeSuccIds=revAnnexe
+  const _revAnnexeIsSucc=revAnnexe?!!(db.succursales||[]).find(s=>s.id===revAnnexe):false;
+  // Pour une succursale sélectionnée : info pour matcher aussi par annexeName (recettes mal liées)
+  const _revSuccursaleInfo=_revAnnexeIsSucc?(db.succursales||[]).find(s=>s.id===revAnnexe):null;
+  const _revSuccNamesSet=_revSuccursaleInfo
+    ? new Set([
+        (_revSuccursaleInfo.code||"").toLowerCase(),
+        (_revSuccursaleInfo.name||"").toLowerCase(),
+        (_revSuccursaleInfo.id||"").toLowerCase(),
+        // Variante "WIFI-XX" dérivée de l'id "wifi-xx"
+        (_revSuccursaleInfo.id||"").replace(/^genx-?/i,"").toLowerCase(),
+      ].filter(Boolean))
+    : null;
+  // Pour une annexe sélectionnée : matcher aussi par le code/nom de l'annexe (recettes mal liées)
+  const _revAnnexeInfo=(!_revAnnexeIsSucc&&revAnnexe)?(db.annexes||[]).find(a=>a.id===revAnnexe):null;
+  const _revAnnexeNamesSet=_revAnnexeInfo
+    ? new Set([(_revAnnexeInfo.code||"").toLowerCase(),(_revAnnexeInfo.name||"").toLowerCase()].filter(Boolean))
+    : null;
+  // Pour une annexe sélectionnée : inclure aussi les recettes stockées avec annexeId = succursale enfant
+  const _revAnnexeSuccIds=(!_revAnnexeIsSucc&&revAnnexe)
     ? (db.succursales||[]).filter(s=>s.annexeId===revAnnexe&&s.active!==false).map(s=>s.id)
     : [];
   const filteredRevenues=(db.partnerRevenues||[])
-    .filter(r=>inPeriodDate(r.date,revGran,revDate,revDateTo))
-    .filter(r=>!revAnnexe||(r.annexeId===revAnnexe||_revAnnexeSuccIds.includes(r.annexeId)))
+    .filter(r=>inPeriodDate(r.date,revGran,revDate,revDateTo)&&inNavRev(r))
+    .filter(r=>{
+      if(!revAnnexe) return true;
+      if(r.annexeId===revAnnexe) return true;
+      if(_revAnnexeIsSucc){
+        // Succursale : chercher aussi par annexeName (données legacy)
+        if(_revSuccNamesSet&&r.annexeName&&_revSuccNamesSet.has(r.annexeName.toLowerCase())) return true;
+      } else {
+        // Annexe : inclure les recettes dont annexeId = succursale enfant (données récentes)
+        if(_revAnnexeSuccIds.includes(r.annexeId)) return true;
+        // Chercher aussi par annexeName (données legacy)
+        if(_revAnnexeNamesSet&&r.annexeName&&_revAnnexeNamesSet.has(r.annexeName.toLowerCase())) return true;
+      }
+      return false;
+    })
     .filter(r=>!revQ.trim()||(`${r.note||""} ${r.amount} ${r.createdByName||""} ${r.annexeName||""}`).toLowerCase().includes(revQ.toLowerCase()))
     .sort((a,b)=>(b.date||"").localeCompare(a.date||""));
   const totalFilteredRevenue=filteredRevenues.reduce((s,r)=>s+(Number(r.amount)||0),0);
@@ -10877,9 +10855,9 @@ function Investisseurs(){
     printDocument({title:"Bulletin de dividende",subtitle:`${esc(p.name)} · ${esc(prettyMonth(calcMonth))}`,scope:"",period:`Réf: ${ref}`,body,signatures:[]});
   };
 
-  const payDividend=(p)=>{
-    const dividend=(Number(p.sharePct)||0)/100*netProfit;
-    if(!confirm(`Payer le dividende de ${p.name} ?\n${p.sharePct}% × ${fcfa(netProfit)} = ${fcfa(Math.round(dividend))}`)) return;
+  const payDividend=(p,preCalcDividend)=>{
+    const dividend=preCalcDividend!=null?preCalcDividend:Math.round((Number(p.sharePct)||0)/100*netProfit);
+    if(!confirm(`Payer le dividende de ${p.name} ?\nMontant : ${fcfa(dividend)}`)) return;
     const ref="DIV-"+calcMonth+"-"+p.id.slice(-4).toUpperCase();
     const payment={
       id:uid("div"),ref,
@@ -11288,7 +11266,10 @@ function Investisseurs(){
    BILAN FINANCIER — Vue consolidée par niveau hiérarchique
    ═══════════════════════════════════════════════════════ */
 function BilanFinancier(){
-  const {db,user}=useApp();
+  const {db,user,nav,scopedAnnexeIds,scopedSubIds}=useApp();
+  const navAnx = scopedAnnexeIds || [];
+  const navSubs = scopedSubIds || [];
+  const navSucIds = nav.level==="succursale" ? [nav.id] : (db.succursales||[]).filter(s=>navAnx.includes(s.annexeId)).map(s=>s.id);
   const canView=user.role==="admin"||hasPerm(db,user,"access:bilanfinancier");
   if(!canView) return <div className="page"><Empty icon="🔒" title="Accès restreint" sub="Vous n'avez pas la permission de voir cette section."/></div>;
   const [tab,setTab]=useState("vue");
@@ -11311,8 +11292,18 @@ function BilanFinancier(){
     return false;
   };
 
-  const allRevs=(db.partnerRevenues||[]).filter(r=>inPeriod(r.date));
-  const allExp=(db.expenses||[]).filter(e=>inPeriod(e.date));
+  const inNavScope=(r)=>{
+    if(nav.level==="holding") return true;
+    const aid=r.annexeId||r.succursaleId;
+    if(!aid) return navSubs.includes(r.subsidiaryId);
+    const suc=(db.succursales||[]).find(s=>s.id===aid);
+    const annexeId=suc?suc.annexeId:aid;
+    if(navSucIds.includes(aid)||navSucIds.includes(r.succursaleId)) return true;
+    if(navAnx.includes(annexeId)||navAnx.includes(aid)) return true;
+    return false;
+  };
+  const allRevs=(db.partnerRevenues||[]).filter(r=>inPeriod(r.date)&&inNavScope(r));
+  const allExp=(db.expenses||[]).filter(e=>inPeriod(e.date)&&inNavScope(e));
 
   // Recettes pour une entité (annexeId pointe vers succursale ou filiale)
   const revsFor=(entityId,entityLevel)=>allRevs.filter(r=>{
@@ -11324,7 +11315,16 @@ function BilanFinancier(){
     const subId=db.annexes.find(a=>a.id===annexeId)?.subsidiaryId;
     if(entityLevel==="subsidiary") return subId===entityId;
     if(entityLevel==="annexe") return aid===entityId||annexeId===entityId;
-    if(entityLevel==="succursale") return aid===entityId;
+    if(entityLevel==="succursale"){
+      if(aid===entityId) return true;
+      // Pattern legacy: annexeId=annexeParente + annexeName=code/nom/id de la succursale
+      const sucObj=(db.succursales||[]).find(s=>s.id===entityId);
+      if(sucObj&&aid===sucObj.annexeId&&r.annexeName){
+        const an=r.annexeName.toLowerCase();
+        return an===(sucObj.code||"").toLowerCase()||an===(sucObj.name||"").toLowerCase()||an===(sucObj.id||"").toLowerCase();
+      }
+      return false;
+    }
     return false;
   }).reduce((t,r)=>t+(r.amount||0),0);
 
@@ -11471,7 +11471,7 @@ function BilanFinancier(){
 
         {open["holding"]&&(
           <div style={{marginTop:12,borderTop:"1px solid var(--line)",paddingTop:12}}>
-            {db.subsidiaries.map(sub=>{
+            {db.subsidiaries.filter(sub=>nav.level==="holding"||navSubs.includes(sub.id)).map(sub=>{
               const subRevs=revsFor(sub.id,"subsidiary");
               const subExp=expFor(sub.id,"subsidiary");
               return (
@@ -11489,7 +11489,7 @@ function BilanFinancier(){
 
                   {open[sub.id]&&(
                     <div style={{marginTop:10,borderTop:"1px solid var(--line)",paddingTop:10}}>
-                      {db.annexes.filter(a=>a.subsidiaryId===sub.id).map(ann=>{
+                      {db.annexes.filter(a=>a.subsidiaryId===sub.id&&(nav.level==="holding"||nav.level==="subsidiary"||navAnx.includes(a.id))).map(ann=>{
                         const annRevs=revsFor(ann.id,"annexe");
                         const annExp=expFor(ann.id,"annexe");
                         return (
@@ -11546,18 +11546,53 @@ function BilanFinancier(){
 
       {/* ── VUE PAR ENTITÉ ── */}
       {tab==="entite"&&(()=>{
-        // Recettes propres d'une entité = partnerRevenues avec annexeId === entityId
+        // Helper: set des codes/noms d'une entité pour matcher annexeName legacy
+        const _namesSet=(entity)=>new Set([
+          (entity.code||"").toLowerCase(),
+          (entity.name||"").toLowerCase(),
+          (entity.id||"").toLowerCase(),
+        ].filter(Boolean));
+
+        // Recettes propres d'une succursale = annexeId===sucId OU (annexeId===annexeParente && annexeName===code/nom suc)
+        const revsOwnSuc=(suc)=>{
+          const names=_namesSet(suc);
+          return allRevs.filter(r=>
+            r.annexeId===suc.id ||
+            (r.annexeId===suc.annexeId && r.annexeName && names.has(r.annexeName.toLowerCase()))
+          ).reduce((t,r)=>t+(r.amount||0),0);
+        };
+        // Recettes propres d'une annexe = annexeId===annId SAUF celles déjà attribuées à une succursale enfant
+        const revsOwnAnx=(ann)=>{
+          const succs=(db.succursales||[]).filter(s=>s.annexeId===ann.id&&s.active!==false);
+          const sucNames=new Set(succs.flatMap(s=>[
+            (s.code||"").toLowerCase(),(s.name||"").toLowerCase(),(s.id||"").toLowerCase()
+          ].filter(Boolean)));
+          return allRevs.filter(r=>
+            r.annexeId===ann.id &&
+            !(r.annexeName && sucNames.has(r.annexeName.toLowerCase()))
+          ).reduce((t,r)=>t+(r.amount||0),0);
+        };
+        // Recettes propres generique (subsidiary, holding)
         const revsOwn=(entityId)=>allRevs.filter(r=>r.annexeId===entityId).reduce((t,r)=>t+(r.amount||0),0);
         // Dépenses propres d'une entité = expenses avec annexeId === entityId
         const expOwn=(entityId)=>allExp.filter(e=>e.annexeId===entityId).reduce((t,e)=>t+(e.amount||0),0);
-        // Pour une filiale : consolide ses propres recettes/dépenses + celles de ses succursales
+        // Pour une filiale : recettes propres de l'annexe + celles de ses succursales
         const revsFiliale=(ann)=>{
           const succs=(db.succursales||[]).filter(s=>s.annexeId===ann.id&&s.active!==false);
-          return revsOwn(ann.id)+succs.reduce((t,s)=>t+revsOwn(s.id),0);
+          return revsOwnAnx(ann)+succs.reduce((t,s)=>t+revsOwnSuc(s),0);
         };
         const expFiliale=(ann)=>{
           const succs=(db.succursales||[]).filter(s=>s.annexeId===ann.id&&s.active!==false);
           return expOwn(ann.id)+succs.reduce((t,s)=>t+expOwn(s.id),0);
+        };
+        // Total consolidé d'une subsidiary (somme de toutes ses annexes+succursales)
+        const revsSub=(sub)=>{
+          const anns=db.annexes.filter(a=>a.subsidiaryId===sub.id);
+          return revsOwn(sub.id)+anns.reduce((t,ann)=>t+revsFiliale(ann),0);
+        };
+        const expSub=(sub)=>{
+          const anns=db.annexes.filter(a=>a.subsidiaryId===sub.id);
+          return expOwn(sub.id)+anns.reduce((t,ann)=>t+expFiliale(ann),0);
         };
         // Recettes propres holding = partnerRevenues sans annexeId ou annexeId non reconnu
         const knownIds=new Set([
@@ -11604,6 +11639,28 @@ function BilanFinancier(){
           printDocument({title:"Vue par entité — Recettes & Dépenses propres",subtitle:"Chaque entité affiche uniquement ses propres recettes et dépenses",scope:companyName,period:periodLabel,body});
         };
 
+        // Filtrage selon le périmètre de navigation
+        const showHolding = nav.level==="holding";
+        const showSub = (sub) => {
+          if(nav.level==="holding") return true;
+          if(nav.level==="subsidiary") return navSubs.includes(sub.id);
+          // annexe ou succursale : afficher le groupe parent si c'est le bon subsidiary
+          const anxInSub = db.annexes.filter(a=>a.subsidiaryId===sub.id).some(a=>navAnx.includes(a.id));
+          return anxInSub;
+        };
+        const showAnx = (ann) => {
+          if(nav.level==="holding") return true;
+          if(nav.level==="subsidiary") return db.annexes.filter(a=>a.subsidiaryId===ann.subsidiaryId).some(a=>navAnx.includes(a.id));
+          return navAnx.includes(ann.id);
+        };
+        const showSuc = (s) => {
+          if(nav.level==="holding") return true;
+          if(nav.level==="subsidiary") return navAnx.includes(s.annexeId);
+          if(nav.level==="annexe") return navAnx.includes(s.annexeId);
+          if(nav.level==="succursale") return navSucIds.includes(s.id);
+          return false;
+        };
+
         return (
           <div>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
@@ -11620,17 +11677,24 @@ function BilanFinancier(){
                   <th className="right">Bénéfice net</th>
                 </tr></thead>
                 <tbody>
-                  <Row label={companyName} type="Holding" revs={revsHolding} exp={expHolding}/>
-                  {db.subsidiaries.map(sub=>(
+                  {showHolding&&(()=>{
+                    const totalR=revsHolding+db.subsidiaries.reduce((t,sub)=>t+revsSub(sub),0);
+                    const totalE=expHolding+db.subsidiaries.reduce((t,sub)=>t+expSub(sub),0);
+                    return <Row label={companyName} type="Holding" revs={totalR} exp={totalE}/>;
+                  })()}
+                  {db.subsidiaries.filter(showSub).map(sub=>(
                     <React.Fragment key={sub.id}>
-                      <Row label={`${sub.code} · ${sub.name}`} type="Groupe" revs={revsOwn(sub.id)} exp={expOwn(sub.id)} indent={1}/>
-                      {db.annexes.filter(a=>a.subsidiaryId===sub.id).map(ann=>{
-                        const hasSuc=(db.succursales||[]).some(s=>s.annexeId===ann.id&&s.active!==false);
+                      {nav.level==="holding"||nav.level==="subsidiary"
+                        ? <Row label={`${sub.code} · ${sub.name}`} type="Groupe" revs={revsSub(sub)} exp={expSub(sub)} indent={showHolding?1:0}/>
+                        : null}
+                      {db.annexes.filter(a=>a.subsidiaryId===sub.id&&showAnx(a)).map(ann=>{
+                        const hasSuc=(db.succursales||[]).some(s=>s.annexeId===ann.id&&s.active!==false&&showSuc(s));
+                        const indentAnx=showHolding?2:nav.level==="subsidiary"?1:0;
                         return (
                           <React.Fragment key={ann.id}>
-                            <Row label={`${ann.code} · ${ann.name}`} type={hasSuc?"Filiale (+ succursales)":"Filiale"} revs={revsFiliale(ann)} exp={expFiliale(ann)} indent={2}/>
-                            {(db.succursales||[]).filter(s=>s.annexeId===ann.id&&s.active!==false).map(s=>(
-                              <Row key={s.id} label={s.code||s.name} type="Succursale" revs={revsOwn(s.id)} exp={expOwn(s.id)} indent={3}/>
+                            <Row label={`${ann.code} · ${ann.name}`} type={hasSuc?"Filiale (+ succursales)":"Filiale"} revs={revsFiliale(ann)} exp={expFiliale(ann)} indent={indentAnx}/>
+                            {(db.succursales||[]).filter(s=>s.annexeId===ann.id&&s.active!==false&&showSuc(s)).map(s=>(
+                              <Row key={s.id} label={s.code||s.name} type="Succursale" revs={revsOwnSuc(s)} exp={expOwn(s.id)} indent={indentAnx+1}/>
                             ))}
                           </React.Fragment>
                         );
@@ -11647,15 +11711,37 @@ function BilanFinancier(){
       {/* ── CLASSEMENT ── */}
       {tab==="classement"&&(()=>{
         // Calcul bénéfice net pour chaque niveau
-        const sucData=(db.succursales||[]).filter(s=>s.active!==false).map(s=>{
+        // Filtres périmètre pour le classement
+        const clsSucFilter=(s)=>{
+          if(nav.level==="holding") return true;
+          if(nav.level==="succursale") return navSucIds.includes(s.id);
+          if(nav.level==="annexe") return navAnx.includes(s.annexeId);
+          if(nav.level==="subsidiary") return db.annexes.filter(a=>a.subsidiaryId===navSubs[0]).some(a=>a.id===s.annexeId);
+          return true;
+        };
+        const clsAnnFilter=(a)=>{
+          if(nav.level==="holding") return true;
+          if(nav.level==="subsidiary") return navSubs.includes(a.subsidiaryId)||db.annexes.filter(x=>navSubs.includes(x.subsidiaryId)).some(x=>x.id===a.id);
+          if(nav.level==="annexe") return navAnx.includes(a.id);
+          if(nav.level==="succursale") return navAnx.includes(a.id);
+          return true;
+        };
+        const clsSubFilter=(s)=>{
+          if(nav.level==="holding") return true;
+          if(nav.level==="subsidiary") return navSubs.includes(s.id);
+          if(nav.level==="annexe") return db.annexes.filter(a=>navAnx.includes(a.id)).some(a=>a.subsidiaryId===s.id);
+          if(nav.level==="succursale") return db.annexes.filter(a=>navAnx.includes(a.id)).some(a=>a.subsidiaryId===s.id);
+          return true;
+        };
+        const sucData=(db.succursales||[]).filter(s=>s.active!==false&&clsSucFilter(s)).map(s=>{
           const r=revsFor(s.id,"succursale"); const e=expFor(s.id,"succursale");
           return {id:s.id,name:s.code||s.name,type:"Succursale",revs:r,exp:e,ben:r-e};
         }).sort((a,b)=>b.ben-a.ben);
-        const annData=db.annexes.map(a=>{
+        const annData=db.annexes.filter(clsAnnFilter).map(a=>{
           const r=revsFor(a.id,"annexe"); const e=expFor(a.id,"annexe");
           return {id:a.id,name:a.code+" · "+a.name,type:"Filiale",revs:r,exp:e,ben:r-e};
         }).sort((a,b)=>b.ben-a.ben);
-        const subData=db.subsidiaries.map(s=>{
+        const subData=db.subsidiaries.filter(clsSubFilter).map(s=>{
           const r=revsFor(s.id,"subsidiary"); const e=expFor(s.id,"subsidiary");
           return {id:s.id,name:s.code+" · "+s.name,type:"Groupe",revs:r,exp:e,ben:r-e};
         }).sort((a,b)=>b.ben-a.ben);
@@ -11823,8 +11909,8 @@ function BilanFinancier(){
               <button className="btn ghost" onClick={printClassement}>🖨 Imprimer</button>
             </div>
             <div style={{display:"flex",gap:16,flexWrap:"wrap",alignItems:"flex-start"}}>
-              <Podium title="Meilleurs groupes" icon="🏢" data={subData}/>
-              <Podium title="Meilleures filiales" icon="🏗" data={annData}/>
+              {(nav.level==="holding"||nav.level==="subsidiary")&&<Podium title="Meilleurs groupes" icon="🏢" data={subData}/>}
+              {(nav.level==="holding"||nav.level==="subsidiary")&&<Podium title="Meilleures filiales" icon="🏗" data={annData}/>}
               <Podium title="Meilleures succursales" icon="🏬" data={sucData}/>
             </div>
           </div>
@@ -12643,16 +12729,8 @@ function Pointage(){
   const [validerMois,setValiderMois]=useState(today().slice(0,7));
   const [validerEmp,setValiderEmp]=useState("");
 
-  // Filtre périmètre sur les employés (hors vendeurs)
-  const employees=(db.employees||[]).filter(e=>{
-    if(!e.active||e.role==="vendeur") return false;
-    if(isAdmin||user?.level==="holding") return true;
-    const scopeAnx=userScope.annexes||[];
-    const scopeSuc=userScope.sucIds||[];
-    if(scopeAnx.includes(e.assignmentId||e.annexeId)) return true;
-    if(e.succursaleId && scopeSuc.includes(e.succursaleId)) return true;
-    return false;
-  });
+  // Filtre périmètre réactif au nav (hors vendeurs) — utilise useScopedEmployees()
+  const employees=useScopedEmployees().filter(e=>e.role!=="vendeur");
 
   const openSession=(empId)=>(db.timeSessions||[]).find(s=>s.employeeId===empId&&s.status==="open");
   const lastEntry=(empId)=>(db.timeEntries||[]).filter(r=>r.employeeId===empId).sort((a,b)=>b.datetimeEmployee.localeCompare(a.datetimeEmployee))[0];
@@ -13607,13 +13685,28 @@ function Permanences(){
     if(nav.level==="subsidiary"){
       const aid=resolveEmpAnnexe(e);
       const suc=(db.succursales||[]).find(s=>s.id===aid);
-      const annexeId=suc?suc.annexeId:aid;
-      return (db.annexes||[]).find(a=>a.id===annexeId)?.subsidiaryId===nav.id;
+      const empAnnexeId=suc?suc.annexeId:aid;
+      // Vérifier que l'annexe appartient EXACTEMENT à cette filiale
+      // et que l'annexe fait partie du périmètre de navigation
+      const annexe=(db.annexes||[]).find(a=>a.id===empAnnexeId);
+      if(!annexe||annexe.subsidiaryId!==nav.id) return false;
+      // Vérifier aussi via annexeIds pour les techniciens multi-annexes
+      if(e.annexeIds&&e.annexeIds.length>0){
+        return e.annexeIds.some(aid2=>{
+          const a2=(db.annexes||[]).find(a=>a.id===aid2);
+          return a2&&a2.subsidiaryId===nav.id;
+        });
+      }
+      return true;
     }
     if(nav.level==="annexe"){
       const aid=resolveEmpAnnexe(e);
       const suc=(db.succursales||[]).find(s=>s.id===aid);
-      return aid===nav.id||(suc&&suc.annexeId===nav.id);
+      const empAnnexeId=suc?suc.annexeId:aid;
+      if(empAnnexeId===nav.id) return true;
+      // Techniciens multi-annexes
+      if(e.annexeIds&&e.annexeIds.includes(nav.id)) return true;
+      return false;
     }
     if(nav.level==="succursale"){
       const suc=(db.succursales||[]).find(s=>s.id===nav.id);
@@ -13632,8 +13725,21 @@ function Permanences(){
     return true;
   };
 
+  const navAnnexeIds=(db.annexes||[]).filter(a=>{
+    if(nav.level==="holding") return true;
+    if(nav.level==="subsidiary") return a.subsidiaryId===nav.id;
+    if(nav.level==="annexe") return a.id===nav.id;
+    if(nav.level==="succursale"){const s=(db.succursales||[]).find(x=>x.id===nav.id);return s&&a.id===s.annexeId;}
+    return false;
+  }).map(a=>a.id);
+
   const perms=(db.permanences||[]).filter(p=>{
-    if(!scopedEmps.some(e=>e.id===p.employeeId)) return false;
+    // Filtrer par annexeId sur la permanence (priorité), sinon via l'employé
+    if(p.annexeId){
+      if(nav.level!=="holding"&&!navAnnexeIds.includes(p.annexeId)) return false;
+    } else {
+      if(!scopedEmps.some(e=>e.id===p.employeeId)) return false;
+    }
     if(!inPeriod(p.date)) return false;
     if(fStatus&&p.status!==fStatus) return false;
     if(fEmp&&p.employeeId!==fEmp) return false;
@@ -13974,9 +14080,11 @@ function PermanencePayModal({perm,employees,onClose,mutate,user,annexeById,db}){
 
 /* Historique des paiements de permanence */
 function PermanencePayments({employees,canPay,db,mutate,user,annexeById}){
+  const {nav}=useApp();
   const canPayDelete=hasPerm(db,user,"do:permanence_pay_delete")||user.role==="admin";
   const [q,setQ]=useState("");
   const [fEmp,setFEmp]=useState("");
+  const [fAnnexe,setFAnnexe]=useState("");
   const [fGran,setFGran]=useState("month");
   const [fDate,setFDate]=useState(today());
 
@@ -14005,14 +14113,39 @@ function PermanencePayments({employees,canPay,db,mutate,user,annexeById}){
     return fDate.slice(0,4);
   };
 
+  // Annexes accessibles selon périmètre nav
+  const navAnnexeIds=(db.annexes||[]).filter(a=>{
+    if(nav.level==="holding") return true;
+    if(nav.level==="subsidiary") return a.subsidiaryId===nav.id;
+    if(nav.level==="annexe") return a.id===nav.id;
+    if(nav.level==="succursale"){const s=(db.succursales||[]).find(x=>x.id===nav.id);return s&&a.id===s.annexeId;}
+    return false;
+  }).map(a=>a.id);
+
+  const annexesForFilter=(db.annexes||[]).filter(a=>navAnnexeIds.includes(a.id));
+
   const empIds=new Set(employees.map(e=>e.id));
   const pays=(db.permanencePayments||[])
-    .filter(p=>empIds.has(p.employeeId)&&inPeriod(p.date))
+    .filter(p=>{
+      if(!empIds.has(p.employeeId)) return false;
+      if(!inPeriod(p.date)) return false;
+      // Filtre périmètre par annexe de la permanence associée
+      const perm=(db.permanences||[]).find(x=>x.id===p.permanenceId);
+      const permAnnexeId=perm?.annexeId||null;
+      if(permAnnexeId && !navAnnexeIds.includes(permAnnexeId)) return false;
+      return true;
+    })
     .filter(p=>{
       if(fEmp&&p.employeeId!==fEmp) return false;
+      if(fAnnexe){
+        const perm=(db.permanences||[]).find(x=>x.id===p.permanenceId);
+        if(!perm||perm.annexeId!==fAnnexe) return false;
+      }
       if(q.trim()){
         const emp=employees.find(e=>e.id===p.employeeId);
-        const hay=`${emp?.name||""} ${p.ref||""} ${p.note||""}`.toLowerCase();
+        const perm=(db.permanences||[]).find(x=>x.id===p.permanenceId);
+        const ann=annexeById(perm?.annexeId||"");
+        const hay=`${emp?.name||""} ${p.ref||""} ${p.note||""} ${ann?.code||""}`.toLowerCase();
         if(!hay.includes(q.toLowerCase())) return false;
       }
       return true;
@@ -14078,11 +14211,15 @@ function PermanencePayments({employees,canPay,db,mutate,user,annexeById}){
         </div>
         <input value={q} onChange={e=>setQ(e.target.value)} placeholder="🔍 Rechercher..."
           style={{padding:"7px 10px",borderRadius:9,border:"1px solid var(--line)",fontSize:13,flex:"1 1 150px"}}/>
+        {annexesForFilter.length>1&&<select value={fAnnexe} onChange={e=>setFAnnexe(e.target.value)} style={{padding:"7px 8px",borderRadius:9,border:"1px solid var(--line)",fontSize:13}}>
+          <option value="">Toutes les annexes</option>
+          {annexesForFilter.map(a=><option key={a.id} value={a.id}>{a.code}</option>)}
+        </select>}
         <select value={fEmp} onChange={e=>setFEmp(e.target.value)} style={{padding:"7px 8px",borderRadius:9,border:"1px solid var(--line)",fontSize:13}}>
           <option value="">Tous les agents</option>
           {employees.map(e=><option key={e.id} value={e.id}>{e.name}</option>)}
         </select>
-        {(q||fEmp)&&<button className="btn sm ghost" onClick={()=>{setQ("");setFEmp("");}}>✕</button>}
+        {(q||fEmp||fAnnexe)&&<button className="btn sm ghost" onClick={()=>{setQ("");setFEmp("");setFAnnexe("");}}>✕</button>}
         <span className="muted" style={{fontSize:12}}>{pays.length} paiement(s)</span>
         <button className="btn sm ghost" style={{marginLeft:"auto"}} onClick={printList} disabled={pays.length===0}>⎙ Imprimer la liste</button>
       </div>
@@ -14091,12 +14228,12 @@ function PermanencePayments({employees,canPay,db,mutate,user,annexeById}){
       <div className="card" style={{overflowX:"auto"}}>
         <table style={{width:"100%",fontSize:13}}>
           <thead><tr>
-            <th>Réf</th><th>Payé le</th><th>Agent</th><th>Date perm.</th>
+            <th>Réf</th><th>Payé le</th><th>Agent</th><th>Filiale</th><th>Date perm.</th>
             <th className="right">Heures</th><th className="right">Taux/h</th>
             <th className="right">Total</th><th>Note</th><th></th>
           </tr></thead>
           <tbody>
-            {pays.length===0&&<tr><td colSpan="9" className="muted" style={{textAlign:"center",padding:20}}>Aucun paiement sur cette période.</td></tr>}
+            {pays.length===0&&<tr><td colSpan="10" className="muted" style={{textAlign:"center",padding:20}}>Aucun paiement sur cette période.</td></tr>}
             {pays.map(p=>{
               const emp=employees.find(e=>e.id===p.employeeId);
               const perm=(db.permanences||[]).find(x=>x.id===p.permanenceId);
@@ -14105,6 +14242,7 @@ function PermanencePayments({employees,canPay,db,mutate,user,annexeById}){
                   <td className="mono" style={{fontSize:11,color:"var(--muted)"}}>{p.ref}</td>
                   <td style={{whiteSpace:"nowrap",fontSize:12}}>{fmtDate(p.date)}</td>
                   <td><b>{emp?.name||"—"}</b></td>
+                  <td>{(()=>{const ann=annexeById(perm?.annexeId||"");return ann?<span className="chip">{ann.code}</span>:<span className="muted">—</span>;})()}</td>
                   <td style={{fontSize:12}}>{fmtDate(perm?.date||"")}</td>
                   <td className="right mono">{p.hours}h</td>
                   <td className="right mono">{fcfa(p.hourlyRate)}</td>
@@ -14134,14 +14272,29 @@ function PermanencePayments({employees,canPay,db,mutate,user,annexeById}){
 
 /* Modal création permanence */
 function NewPermanenceModal({onClose,employees}){
-  const {db,mutate,user,annexeById}=useApp();
-  const [empId,setEmpId]=useState(user.employeeId||employees[0]?.id||"");
+  const {db,mutate,user,nav}=useApp();
+  // Exclure les vendeurs de la liste
+  const eligibleEmps=employees.filter(e=>e.role!=="vendeur");
+  const [empId,setEmpId]=useState(()=>{
+    const defEmp=eligibleEmps.find(e=>e.id===user.employeeId)||eligibleEmps[0];
+    return defEmp?.id||"";
+  });
   const [date,setDate]=useState(today());
+  const [annexeId,setAnnexeId]=useState("");
   const [err,setErr]=useState("");
+
+  // Quand l'agent change, pré-remplir l'annexe automatiquement
+  React.useEffect(()=>{
+    const emp=eligibleEmps.find(e=>e.id===empId);
+    if(emp) setAnnexeId(emp.assignmentId||emp.annexeId||"");
+  },[empId]);
+
+  const annexes=db.annexes||[];
 
   const save=()=>{
     if(!empId){setErr("Sélectionnez un agent.");return;}
-    const emp=employees.find(e=>e.id===empId);
+    if(!annexeId){setErr("Sélectionnez une filiale/annexe.");return;}
+    const annexe=annexes.find(a=>a.id===annexeId);
     const n=(db.permanences||[]).length+1;
     mutate(d=>{
       if(!d.permanences) d.permanences=[];
@@ -14149,7 +14302,8 @@ function NewPermanenceModal({onClose,employees}){
         id:uid("perm"),
         ref:"PERM-"+String(n).padStart(4,"0"),
         employeeId:empId,
-        annexeId:emp?.assignmentId||"",
+        annexeId,
+        subsidiaryId:annexe?.subsidiaryId||null,
         date,status:"pending",
         createdAt:nowISO(),createdBy:user.id,createdByName:user.name||user.login||"",
       });
@@ -14164,8 +14318,14 @@ function NewPermanenceModal({onClose,employees}){
       <div className="grid" style={{gap:12}}>
         <Field label="Agent"><select value={empId} onChange={e=>setEmpId(e.target.value)} style={{width:"100%"}}>
           <option value="">-- Sélectionner --</option>
-          {employees.map(e=><option key={e.id} value={e.id}>{e.name} ({e.role})</option>)}
+          {eligibleEmps.map(e=><option key={e.id} value={e.id}>{e.name} ({e.role})</option>)}
         </select></Field>
+        <Field label="Filiale / Annexe">
+          <select value={annexeId} onChange={e=>setAnnexeId(e.target.value)} style={{width:"100%"}}>
+            <option value="">-- Sélectionner --</option>
+            {annexes.map(a=><option key={a.id} value={a.id}>{a.code}{a.name&&a.name!==a.code?` — ${a.name}`:""}</option>)}
+          </select>
+        </Field>
         <Field label="Date"><input type="date" value={date} onChange={e=>setDate(e.target.value)}/></Field>
       </div>
     </Modal>
@@ -15317,8 +15477,10 @@ function Succursales(){
 }
 
 function SurcursaleModal({suc,onClose}){
-  const {db,mutate}=useApp();
-  const [f,setF]=useState(suc||{name:"",code:"",annexeId:"",note:"",active:true});
+  const {db,mutate,nav,scopedAnnexeIds}=useApp();
+  // Déterminer la filiale pré-sélectionnée selon le périmètre nav
+  const navAnnexeId = nav.level==="annexe" ? nav.id : (suc?.annexeId||"");
+  const [f,setF]=useState(suc||{name:"",code:"",annexeId:navAnnexeId,note:"",active:true});
   const [err,setErr]=useState("");
 
   const save=()=>{
@@ -15344,7 +15506,17 @@ function SurcursaleModal({suc,onClose}){
     }
   };
 
-  const annexes=(db.annexes||[]).filter(a=>a.active!==false);
+  // Filtrer les filiales selon le périmètre nav
+  const allAnnexes=(db.annexes||[]).filter(a=>a.active!==false);
+  const annexes = nav.level==="annexe"
+    ? allAnnexes.filter(a=>a.id===nav.id)               // périmètre = une annexe précise → 1 seule
+    : nav.level==="subsidiary"
+      ? allAnnexes.filter(a=>a.subsidiaryId===nav.id)   // périmètre = un groupe → filiales du groupe
+      : nav.level==="succursale"
+        ? allAnnexes.filter(a=>a.id===((db.succursales||[]).find(s=>s.id===nav.id)?.annexeId))
+        : allAnnexes;                                    // holding → tout
+  // Verrouiller quand on est sur une entité précise (annexe ou succursale) en mode création
+  const annexeLocked = !suc && (nav.level==="annexe" || nav.level==="succursale" || (nav.level==="subsidiary" && annexes.length===1));
 
   return (
     <Modal title={suc?"Modifier la succursale":"Nouvelle succursale"} onClose={onClose}
@@ -15356,14 +15528,17 @@ function SurcursaleModal({suc,onClose}){
       <div className="grid" style={{gap:12}}>
         <Field label="Nom de la succursale"><input value={f.name} onChange={e=>setF({...f,name:e.target.value})} placeholder="ex: Agence Nord"/></Field>
         <Field label="Code (optionnel)"><input value={f.code||""} onChange={e=>setF({...f,code:e.target.value})} placeholder="ex: SUC-NORD"/></Field>
-        <Field label="Filiale parente" hint="La filiale à laquelle appartient cette succursale">
-          <select value={f.annexeId} onChange={e=>setF({...f,annexeId:e.target.value})}>
-            <option value="">— Choisir une filiale —</option>
-            {annexes.map(a=>{
-              const sub=(db.subsidiaries||[]).find(s=>s.id===a.subsidiaryId);
-              return <option key={a.id} value={a.id}>{a.code||a.name} ({sub?.name||"Groupe"})</option>;
-            })}
-          </select>
+        <Field label="Filiale parente" hint={annexeLocked?"Fixée par le périmètre sélectionné":"La filiale à laquelle appartient cette succursale"}>
+          {annexeLocked
+            ? <input value={annexes[0]?(()=>{const sub=(db.subsidiaries||[]).find(s=>s.id===annexes[0].subsidiaryId);return `${annexes[0].code||annexes[0].name}${sub?` (${sub.code})`:""}`})():"—"} disabled style={{opacity:.7,cursor:"not-allowed"}}/>
+            : <select value={f.annexeId} onChange={e=>setF({...f,annexeId:e.target.value})}>
+                <option value="">— Choisir une filiale —</option>
+                {annexes.map(a=>{
+                  const sub=(db.subsidiaries||[]).find(s=>s.id===a.subsidiaryId);
+                  return <option key={a.id} value={a.id}>{a.code||a.name} ({sub?.name||"Groupe"})</option>;
+                })}
+              </select>
+          }
         </Field>
         <Field label="Note"><input value={f.note||""} onChange={e=>setF({...f,note:e.target.value})}/></Field>
         {suc&&<Field label="Statut"><select value={f.active?"1":"0"} onChange={e=>setF({...f,active:e.target.value==="1"})}><option value="1">Active</option><option value="0">Inactive</option></select></Field>}
@@ -15437,9 +15612,11 @@ function Annexes(){
   );
 }
 function AnnexeModal({annexe,onClose}){
-  const {db,mutate,scopedSubIds,user}=useApp();
+  const {db,mutate,scopedSubIds,user,nav}=useApp();
   const canDeletePerm=hasPerm(db,user,"do:annexe_delete");
-  const defaultSub=annexe?annexe.subsidiaryId:(scopedSubIds[0]||db.subsidiaries[0]?.id);
+  // Pré-sélectionner le groupe selon le périmètre nav
+  const navSubId = nav.level==="subsidiary" ? nav.id : null;
+  const defaultSub=annexe?annexe.subsidiaryId:(navSubId||scopedSubIds[0]||db.subsidiaries[0]?.id);
   const [f,setF]=useState(annexe||{code:"",name:"",city:"",sector:"",kind:"tickets",commissionRate:0.10,subsidiaryId:defaultSub,createdAt:today(),active:true});
   const [rate,setRate]=useState(((annexe?.commissionRate)||0.10)*100);
   const save=()=>{ if(!f.name||!f.code||!f.subsidiaryId)return; mutate(d=>{ const payload={...f,commissionRate:rate/100}; if(annexe){const i=d.annexes.findIndex(x=>x.id===annexe.id);d.annexes[i]=payload;} else d.annexes.push({id:uid("anx"),...payload}); }); onClose(); };
@@ -15455,7 +15632,22 @@ function AnnexeModal({annexe,onClose}){
   return (
     <Modal title={annexe?"Modifier la filiale":"Créer une filiale"} onClose={onClose}
       foot={<><div style={{flex:1}}>{canDelete && <button className="btn ghost danger" onClick={remove}>Supprimer</button>}</div><button className="btn ghost" onClick={onClose}>Annuler</button><button className="btn" onClick={save}>Enregistrer</button></>}>
-      <Field label="Groupe de rattachement" hint="À quel groupe appartient cette filiale ?"><select value={f.subsidiaryId} onChange={e=>setF({...f,subsidiaryId:e.target.value})}>{db.subsidiaries.map(s=><option key={s.id} value={s.id}>{s.code} · {s.name}</option>)}</select></Field>
+      {(()=>{
+        const subLocked=!annexe&&nav.level==="subsidiary";
+        const visibleSubs=nav.level==="subsidiary"
+          ? db.subsidiaries.filter(s=>s.id===nav.id)
+          : db.subsidiaries;
+        return (
+          <Field label="Groupe de rattachement" hint={subLocked?"Fixé par le périmètre sélectionné":"À quel groupe appartient cette filiale ?"}>
+            {subLocked
+              ? <input value={visibleSubs[0]?`${visibleSubs[0].code} · ${visibleSubs[0].name}`:"—"} disabled style={{opacity:.7,cursor:"not-allowed"}}/>
+              : <select value={f.subsidiaryId} onChange={e=>setF({...f,subsidiaryId:e.target.value})}>
+                  {visibleSubs.map(s=><option key={s.id} value={s.id}>{s.code} · {s.name}</option>)}
+                </select>
+            }
+          </Field>
+        );
+      })()}
       <Field label="Code" hint="Ex : WIFI-KARA, DISTRI-LOME"><input value={f.code} onChange={e=>setF({...f,code:e.target.value.toUpperCase()})}/></Field>
       <div className="row">
         <div style={{flex:1}}><Field label="Nom de la filiale"><input value={f.name} onChange={e=>setF({...f,name:e.target.value})}/></Field></div>
@@ -15473,6 +15665,18 @@ function AnnexeModal({annexe,onClose}){
       </Field>
       <Field label="Date de création"><input type="date" value={f.createdAt} onChange={e=>setF({...f,createdAt:e.target.value})}/></Field>
       {annexe && <Field label="Statut"><select value={f.active?"1":"0"} onChange={e=>setF({...f,active:e.target.value==="1"})}><option value="1">Active</option><option value="0">Inactive</option></select></Field>}
+      {/* ── Notifications Telegram propres à cette filiale ── */}
+      <div style={{marginTop:12,padding:"12px 14px",background:"#eff6ff",borderRadius:10,border:"1px solid #bfdbfe"}}>
+        <div style={{fontWeight:700,fontSize:13,color:"#1e40af",marginBottom:8}}>🤖 Notifications Telegram — cette filiale</div>
+        <p style={{fontSize:12,color:"#3b82f6",margin:"0 0 10px"}}>Si renseigné, les alertes de cette filiale seront envoyées <b>à ce bot ET au bot global de l'app</b> simultanément.</p>
+        <Field label="Token du bot (facultatif)">
+          <input value={f.tgToken||""} placeholder="Laisser vide = bot global" onChange={e=>setF({...f,tgToken:e.target.value.trim()})}/>
+        </Field>
+        <Field label="Chat ID (facultatif)">
+          <input value={f.tgChat||""} placeholder="Laisser vide = chat global" onChange={e=>setF({...f,tgChat:e.target.value.trim()})}/>
+        </Field>
+        {(f.tgToken||f.tgChat)&&<TelegramTestBtn token={f.tgToken} chat={f.tgChat}/>}
+      </div>
       {annexe && blockers.length>0 && (
         <div style={{background:"#fdf3e3",borderLeft:"4px solid var(--accent)",borderRadius:"0 8px 8px 0",padding:"10px 12px",marginTop:6,fontSize:12.5}}>
           <b style={{color:"#c0641f"}}>Suppression impossible :</b> cette filiale contient {blockers.map(([l,n])=>`${n} ${l}`).join(", ")}. Pour conserver l'historique, passez-la plutôt en <b>Inactive</b> ci-dessus.
@@ -15531,17 +15735,17 @@ function printFicheEntite({db,type,code,name,sector,active,kpis,details,period})
 }
 
 function Subsidiaries(){
-  const {db,mutate,user,userScope}=useApp();
+  const {db,mutate,user,userScope,nav,scopedSubIds}=useApp();
   const isAdmin=user?.role==="admin";
   const canCreate=hasPerm(db,user,"do:subsidiary_create");
   const canEditS=hasPerm(db,user,"do:subsidiary_edit");
   const [add,setAdd]=useState(false);const [edit,setEdit]=useState(null);
   usePageActions({ onNew: canCreate?()=>setAdd(true):null });
   const M=useMetrics();
-  // Filtre périmètre : ne montrer que les groupes du périmètre de l'utilisateur
-  const visibleSubs=(isAdmin||user?.level==="holding")
+  // Filtre périmètre réactif au nav : ne montrer que les groupes du périmètre choisi
+  const visibleSubs = nav.level==="holding"
     ? db.subsidiaries
-    : db.subsidiaries.filter(s=>(userScope.subs||[]).includes(s.id));
+    : db.subsidiaries.filter(s=>(scopedSubIds||[]).includes(s.id));
   return (
     <div className="grid" style={{gap:16}}>
       <div className="row" style={{justifyContent:"space-between",alignItems:"center"}}>
@@ -15629,6 +15833,18 @@ function SubsidiaryModal({sub,onClose}){
         <input type="range" min="0" max="50" value={rate} onChange={e=>setRate(Number(e.target.value))}/>
       </Field>
       {sub && <Field label="Statut"><select value={f.active?"1":"0"} onChange={e=>setF({...f,active:e.target.value==="1"})}><option value="1">Active</option><option value="0">Inactive</option></select></Field>}
+      {/* ── Notifications Telegram propres à ce groupe ── */}
+      <div style={{marginTop:12,padding:"12px 14px",background:"#eff6ff",borderRadius:10,border:"1px solid #bfdbfe"}}>
+        <div style={{fontWeight:700,fontSize:13,color:"#1e40af",marginBottom:8}}>🤖 Notifications Telegram — ce groupe</div>
+        <p style={{fontSize:12,color:"#3b82f6",margin:"0 0 10px"}}>Si renseigné, les alertes de ce groupe seront envoyées <b>à ce bot ET au bot global de l'app</b> simultanément.</p>
+        <Field label="Token du bot (facultatif)">
+          <input value={f.tgToken||""} placeholder="Laisser vide = bot global" onChange={e=>setF({...f,tgToken:e.target.value.trim()})}/>
+        </Field>
+        <Field label="Chat ID (facultatif)">
+          <input value={f.tgChat||""} placeholder="Laisser vide = chat global" onChange={e=>setF({...f,tgChat:e.target.value.trim()})}/>
+        </Field>
+        {(f.tgToken||f.tgChat)&&<TelegramTestBtn token={f.tgToken} chat={f.tgChat}/>}
+      </div>
       {sub && blockers.length>0 && (
         <div style={{background:"#fdf3e3",borderLeft:"4px solid var(--accent)",borderRadius:"0 8px 8px 0",padding:"10px 12px",marginTop:6,fontSize:12.5}}>
           <b style={{color:"#c0641f"}}>Suppression impossible :</b> ce groupe contient {blockers.map(([l,n])=>`${n} ${l}`).join(", ")}. Supprimez d'abord ses annexes, ou passez-la en <b>Inactive</b> pour conserver l'historique.
@@ -15642,21 +15858,24 @@ function SubsidiaryModal({sub,onClose}){
    MODULE : Comptes & accès (gestion des connexions)
    ========================================================= */
 function Users(){
-  const {db,user,subById,annexeById,userScope}=useApp();
+  const {db,user,subById,annexeById,userScope,nav,scopedAnnexeIds,scopedSubIds}=useApp();
   const [add,setAdd]=useState(false);const [edit,setEdit]=useState(null);
   usePageActions({ onNew:()=>setAdd(true), onFilter:()=>focusSearch() });
+  const navAnx = scopedAnnexeIds||[];
+  const navSubs = scopedSubIds||[];
+  const navSucIds = nav.level==="succursale"?[nav.id]:(db.succursales||[]).filter(s=>navAnx.includes(s.annexeId)).map(s=>s.id);
   const visible=db.users.filter(u=>{
-    if(user.role==="admin") return true;
+    if(user.role==="admin"&&nav.level==="holding") return true;
     // Ne jamais montrer les comptes holding aux non-admins
-    if(u.level==="holding") return false;
-    if(userScope.subs.length===0) return true; // scope global (holding user)
-    // Vérifier si l'assignmentId de l'autre utilisateur est dans le périmètre
+    if(u.level==="holding") return nav.level==="holding"&&user.role==="admin";
+    if(nav.level==="holding") return true;
+    // Vérifier si l'assignmentId de l'autre utilisateur est dans le périmètre nav
     const ids = Array.isArray(u.annexeIds)&&u.annexeIds.length ? u.annexeIds : (u.assignmentId?[u.assignmentId]:[]);
     return ids.some(id=>
-      userScope.subs.includes(id) ||
-      userScope.annexes.includes(id) ||
-      userScope.sucIds.includes(id) ||
-      (db.annexes||[]).some(a=>a.id===id&&userScope.subs.includes(a.subsidiaryId))
+      navSubs.includes(id) ||
+      navAnx.includes(id) ||
+      navSucIds.includes(id) ||
+      (db.annexes||[]).some(a=>a.id===id&&navSubs.includes(a.subsidiaryId))
     );
   });
   const accountLabel=(u)=>{
@@ -16800,11 +17019,24 @@ function Objectives(){
 const ACTION_LABEL={create:"Création",update:"Modification",delete:"Suppression",login:"Connexion",logout:"Déconnexion"};
 const ACTION_COLOR={create:"#0E7C66",update:"#1F5FA8",delete:"#C2452F",login:"#6B7785",logout:"#6B7785"};
 function ActivityLog(){
-  const {db,user,mutate}=useApp();
+  const {db,user,mutate,nav,scopedAnnexeIds,scopedSubIds}=useApp();
   const isAdmin=user.role==="admin";
   const retention=Number(db.appSettings?.logRetentionDays)||180;
   const retentionLabel=retention>=30?`${Math.round(retention/30)} mois (${retention} jours)`:retention===1?"1 jour":`${retention} jours`;
-  const entries=[...(db.activityLog||[])].sort((a,b)=>(b.at||"").localeCompare(a.at||""));
+  // Utilisateurs dans le périmètre nav courant (pour filtrer les entrées de log)
+  const _navAnxLog = scopedAnnexeIds||[];
+  const _navSucLog = nav.level==="succursale"?[nav.id]:(db.succursales||[]).filter(s=>_navAnxLog.includes(s.annexeId)).map(s=>s.id);
+  const _navSubLog = scopedSubIds||[];
+  const _scopeUserIds = nav.level==="holding" ? null : (db.users||[]).filter(u=>{
+    const emp=(db.employees||[]).find(e=>e.id===u.employeeId||e.login===u.login);
+    if(!emp) return false;
+    if(emp.succursaleId&&_navSucLog.includes(emp.succursaleId)) return true;
+    if(emp.assignmentId&&_navAnxLog.includes(emp.assignmentId)) return true;
+    if(emp.level==="subsidiary"&&_navSubLog.includes(emp.assignmentId)) return true;
+    return false;
+  }).map(u=>u.login);
+  const allEntries=[...(db.activityLog||[])].sort((a,b)=>(b.at||"").localeCompare(a.at||""));
+  const entries = _scopeUserIds===null ? allEntries : allEntries.filter(e=>_scopeUserIds.includes(e.userLogin||e.userName));
   const fmtAt=(iso)=>{ if(!iso) return ""; const d=new Date(iso); return d.toLocaleDateString("fr-FR")+" "+d.toLocaleTimeString("fr-FR",{hour:"2-digit",minute:"2-digit",second:"2-digit"}); };
 
   // Filtres de date
@@ -17575,26 +17807,40 @@ function SupabaseRowCounter(){
    CALENDRIER DES ÉCHÉANCES
    ========================================================= */
 function Echeances(){
-  const {db, mutate, user, userScope} = useApp();
+  const {db, mutate, user, userScope, nav, scopedAnnexeIds} = useApp();
   const isAdmin = user?.role==="admin";
   const [form, setForm] = useState(null); // null=fermé, {}=nouveau, {id,...}=édition
   const [confirmDel, setConfirmDel] = useState(null);
   const [viewMode, setViewMode] = useState("liste"); // "liste" | "calendrier"
   const [filterPaid, setFilterPaid] = useState("unpaid"); // "all"|"unpaid"|"paid"
+  const [filterPerim, setFilterPerim] = useState(""); // "" = tous, annexeId ou succursaleId
   const now = new Date();
   const todayStr = now.toISOString().slice(0,10);
 
-  // Filtre périmètre : ne montrer que les échéances du périmètre de l'utilisateur
+  // Filtre périmètre navigation (nav)
+  const navAnx = scopedAnnexeIds||[];
+  const navSucIds = nav.level==="succursale" ? [nav.id] : (db.succursales||[]).filter(s=>navAnx.includes(s.annexeId)).map(s=>s.id);
   const allDeadlines = (db.deadlines||[]).sort((a,b)=>(a.dueDate||"").localeCompare(b.dueDate||""));
   const deadlines = allDeadlines.filter(d=>{
-    if(isAdmin||user?.level==="holding") return true;
-    if(!d.subsidiaryId) return true; // échéance globale (holding) visible par tous
-    return (userScope.subs||[]).includes(d.subsidiaryId);
+    // Filtre droits utilisateur
+    if(!isAdmin && user?.level!=="holding" && d.subsidiaryId && !(userScope.subs||[]).includes(d.subsidiaryId)) return false;
+    // Filtre périmètre nav
+    if(nav.level==="holding") return true;
+    if(!d.annexeId && !d.succursaleId) return true; // échéance globale visible partout
+    if(d.succursaleId) return navSucIds.includes(d.succursaleId);
+    if(d.annexeId) return navAnx.includes(d.annexeId);
+    return false;
   });
 
   const filtered = deadlines.filter(d=>{
-    if(filterPaid==="unpaid") return !d.paid;
-    if(filterPaid==="paid") return !!d.paid;
+    if(filterPaid==="unpaid" && d.paid) return false;
+    if(filterPaid==="paid" && !d.paid) return false;
+    if(filterPerim){
+      // filterPerim peut être un annexeId ou un succursaleId
+      const isSuc=(db.succursales||[]).some(s=>s.id===filterPerim);
+      if(isSuc) return d.succursaleId===filterPerim;
+      else return d.annexeId===filterPerim && !d.succursaleId;
+    }
     return true;
   });
 
@@ -17741,29 +17987,49 @@ function Echeances(){
       {/* Vue liste */}
       {viewMode==="liste" && (
         <div className="card">
-          <div className="card-pad" style={{paddingBottom:8,display:"flex",gap:8,alignItems:"center"}}>
-            {["all","unpaid","paid"].map(v=>(
-              <button key={v} className={"btn sm "+(filterPaid===v?"":"ghost")} onClick={()=>setFilterPaid(v)}
-                style={filterPaid===v?{}:{opacity:.7}}>
-                {v==="all"?"Toutes":v==="unpaid"?"Impayées":"Réglées"}
-              </button>
-            ))}
+          <div className="card-pad" style={{paddingBottom:8,display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+            <div className="row" style={{gap:4}}>
+              {["all","unpaid","paid"].map(v=>(
+                <button key={v} className={"btn sm "+(filterPaid===v?"":"ghost")} onClick={()=>setFilterPaid(v)}
+                  style={filterPaid===v?{}:{opacity:.7}}>
+                  {v==="all"?"Toutes":v==="unpaid"?"Impayées":"Réglées"}
+                </button>
+              ))}
+            </div>
+            <div style={{marginLeft:"auto",display:"flex",gap:8,alignItems:"center"}}>
+              <select value={filterPerim} onChange={e=>setFilterPerim(e.target.value)} style={{fontSize:12,padding:"4px 8px",borderRadius:6,border:"1px solid var(--line)",background:"var(--paper)",color:"var(--ink)",minWidth:160}}>
+                <option value="">📍 Tous les périmètres</option>
+                {(db.annexes||[]).filter(a=>nav.level==="holding"||navAnx.includes(a.id)).map(a=>{
+                  const sucs=(db.succursales||[]).filter(s=>s.annexeId===a.id&&s.active!==false&&(nav.level==="holding"||navSucIds.includes(s.id)));
+                  return [
+                    <option key={a.id} value={a.id}>🏗 {a.code} · {a.name}</option>,
+                    ...sucs.map(s=><option key={s.id} value={s.id}>　↳ {s.code||s.name}</option>)
+                  ];
+                })}
+              </select>
+              {filterPerim && <button className="btn sm ghost" style={{fontSize:11}} onClick={()=>setFilterPerim("")}>✕</button>}
+            </div>
           </div>
           {filtered.length===0 ? (
             <div className="empty" style={{padding:32}}><div className="big">📅</div><div style={{fontWeight:700}}>Aucune échéance</div><div className="muted" style={{marginTop:4}}>Cliquez sur "+ Nouvelle échéance" pour commencer</div></div>
           ) : (
             <div style={{overflowX:"auto"}}><table>
-              <thead><tr><th>Statut</th><th>Label</th><th>Catégorie</th><th>Date due</th><th className="right">Montant</th><th>Récurrence</th><th>Note</th><th></th></tr></thead>
+              <thead><tr><th>Statut</th><th>Label</th><th>Périmètre</th><th>Catégorie</th><th>Date due</th><th className="right">Montant</th><th>Récurrence</th><th>Note</th><th></th></tr></thead>
               <tbody>
-                {filtered.map(d=>(
+                {filtered.map(d=>{
+                  const anx=d.annexeId?(db.annexes||[]).find(a=>a.id===d.annexeId):null;
+                  const suc=d.succursaleId?(db.succursales||[]).find(s=>s.id===d.succursaleId):null;
+                  const perim=suc?(suc.code||suc.name):anx?(anx.code):"—";
+                  return (
                   <tr key={d.id} style={rowStyle(d)}>
                     <td>{statusTag(d)}</td>
                     <td style={{fontWeight:600}}>{d.label||"—"}</td>
+                    <td><span className="tag" style={{fontSize:11,background:"var(--bg2)"}}>{perim}</span></td>
                     <td className="muted" style={{fontSize:12}}>{d.category||"—"}</td>
                     <td className="mono" style={{fontSize:13}}>{d.dueDate||"—"}</td>
                     <td className="right mono" style={{fontWeight:700}}>{fcfa(d.amount||0)}</td>
                     <td className="muted" style={{fontSize:12}}>{d.recurrence==="monthly"?"Mensuelle":d.recurrence==="weekly"?"Hebdomadaire":d.recurrence==="yearly"?"Annuelle":"Ponctuelle"}</td>
-                    <td className="muted" style={{fontSize:12,maxWidth:160,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{d.note||""}</td>
+                    <td className="muted" style={{fontSize:12,maxWidth:140,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{d.note||""}</td>
                     <td>
                       <div className="row" style={{gap:4}}>
                         {!d.paid && <button className="btn sm" style={{fontSize:11,padding:"3px 8px",background:"var(--ok)"}} onClick={()=>markPaid(d.id)}>✅ Payer</button>}
@@ -17773,7 +18039,8 @@ function Echeances(){
                       </div>
                     </td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table></div>
           )}
@@ -17781,29 +18048,96 @@ function Echeances(){
       )}
 
       {/* Modal formulaire */}
-      {form && (
+      {form && (()=>{
+        const formAnxId=form.annexeId||"";
+        const formSucId=form.succursaleId||"";
+        const anxOptions=db.annexes||[];
+        const sucOptions=(db.succursales||[]).filter(s=>s.active!==false&&(!formAnxId||s.annexeId===formAnxId));
+        return (
         <div className="modal-overlay" onClick={e=>e.target===e.currentTarget&&setForm(null)}>
-          <div className="modal-box" style={{maxWidth:440}}>
-            <div className="modal-header"><b>{form.id?"Modifier l'échéance":"Nouvelle échéance"}</b><button onClick={()=>setForm(null)}>✕</button></div>
-            <div className="modal-body grid" style={{gap:12}}>
-              <div className="field"><label>Label *</label><input value={form.label||""} onChange={e=>setForm(f=>({...f,label:e.target.value}))} placeholder="Ex: Loyer bureau"/></div>
-              <div className="row" style={{gap:12}}>
-                <div className="field" style={{flex:1}}><label>Date d'échéance *</label><input type="date" value={form.dueDate||""} onChange={e=>setForm(f=>({...f,dueDate:e.target.value}))}/></div>
-                <div className="field" style={{flex:1}}><label>Montant (FCFA)</label><input type="number" value={form.amount||""} onChange={e=>setForm(f=>({...f,amount:Number(e.target.value)}))} placeholder="0"/></div>
+          <div className="modal-box" style={{maxWidth:500,width:"95vw"}}>
+            <div className="modal-header" style={{borderBottom:"1.5px solid var(--line)",paddingBottom:14,marginBottom:0}}>
+              <div>
+                <div style={{fontWeight:800,fontSize:16}}>{form.id?"✏️ Modifier l'échéance":"📅 Nouvelle échéance"}</div>
+                <div className="muted" style={{fontSize:12,marginTop:2}}>Loyer, facture, abonnement, remboursement…</div>
               </div>
-              <div className="row" style={{gap:12}}>
-                <div className="field" style={{flex:1}}><label>Catégorie</label><select value={form.category||""} onChange={e=>setForm(f=>({...f,category:e.target.value}))}><option value="">— Choisir —</option>{CATEGORIES.map(c=><option key={c} value={c}>{c}</option>)}</select></div>
-                <div className="field" style={{flex:1}}><label>Récurrence</label><select value={form.recurrence||"none"} onChange={e=>setForm(f=>({...f,recurrence:e.target.value}))}><option value="none">Ponctuelle</option><option value="weekly">Hebdomadaire</option><option value="monthly">Mensuelle</option><option value="yearly">Annuelle</option></select></div>
-              </div>
-              <div className="field"><label>Note</label><textarea value={form.note||""} onChange={e=>setForm(f=>({...f,note:e.target.value}))} rows={2} placeholder="Bailleur, fournisseur, référence…"/></div>
+              <button onClick={()=>setForm(null)} style={{fontSize:18,lineHeight:1,background:"none",border:"none",cursor:"pointer",color:"var(--muted)"}}>✕</button>
             </div>
-            <div className="modal-footer">
+            <div className="modal-body" style={{display:"grid",gap:14,paddingTop:16}}>
+
+              {/* Label */}
+              <div className="field">
+                <label style={{fontWeight:700}}>Désignation *</label>
+                <input value={form.label||""} onChange={e=>setForm(f=>({...f,label:e.target.value}))} placeholder="Ex: Loyer bureau, Facture internet…" style={{fontSize:14}}/>
+              </div>
+
+              {/* Date + Montant */}
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+                <div className="field">
+                  <label style={{fontWeight:700}}>Date d'échéance *</label>
+                  <input type="date" value={form.dueDate||""} onChange={e=>setForm(f=>({...f,dueDate:e.target.value}))}/>
+                </div>
+                <div className="field">
+                  <label style={{fontWeight:700}}>Montant (FCFA)</label>
+                  <input type="number" value={form.amount||""} onChange={e=>setForm(f=>({...f,amount:Number(e.target.value)}))} placeholder="0"/>
+                </div>
+              </div>
+
+              {/* Catégorie + Récurrence */}
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+                <div className="field">
+                  <label style={{fontWeight:700}}>Catégorie</label>
+                  <select value={form.category||""} onChange={e=>setForm(f=>({...f,category:e.target.value}))}>
+                    <option value="">— Choisir —</option>
+                    {CATEGORIES.map(c=><option key={c} value={c}>{c}</option>)}
+                  </select>
+                </div>
+                <div className="field">
+                  <label style={{fontWeight:700}}>Récurrence</label>
+                  <select value={form.recurrence||"none"} onChange={e=>setForm(f=>({...f,recurrence:e.target.value}))}>
+                    <option value="none">Ponctuelle</option>
+                    <option value="weekly">Hebdomadaire</option>
+                    <option value="monthly">Mensuelle</option>
+                    <option value="yearly">Annuelle</option>
+                  </select>
+                </div>
+              </div>
+
+              {/* Périmètre */}
+              <div style={{background:"var(--bg2)",borderRadius:10,padding:12,display:"grid",gap:10}}>
+                <div style={{fontWeight:700,fontSize:12,color:"var(--muted)",textTransform:"uppercase",letterSpacing:.5}}>📍 Périmètre</div>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+                  <div className="field" style={{margin:0}}>
+                    <label>Filiale</label>
+                    <select value={formAnxId} onChange={e=>setForm(f=>({...f,annexeId:e.target.value||null,succursaleId:null}))}>
+                      <option value="">— Toutes —</option>
+                      {anxOptions.map(a=><option key={a.id} value={a.id}>{a.code} · {a.name}</option>)}
+                    </select>
+                  </div>
+                  <div className="field" style={{margin:0}}>
+                    <label>Succursale</label>
+                    <select value={formSucId} onChange={e=>setForm(f=>({...f,succursaleId:e.target.value||null}))} disabled={!formAnxId}>
+                      <option value="">— Toute la filiale —</option>
+                      {sucOptions.map(s=><option key={s.id} value={s.id}>{s.code||s.name}</option>)}
+                    </select>
+                  </div>
+                </div>
+              </div>
+
+              {/* Note */}
+              <div className="field">
+                <label style={{fontWeight:700}}>Note</label>
+                <textarea value={form.note||""} onChange={e=>setForm(f=>({...f,note:e.target.value}))} rows={2} placeholder="Bailleur, fournisseur, référence contrat…"/>
+              </div>
+            </div>
+            <div className="modal-footer" style={{borderTop:"1.5px solid var(--line)",paddingTop:14,marginTop:4}}>
               <button className="btn ghost" onClick={()=>setForm(null)}>Annuler</button>
-              <button className="btn" onClick={saveForm} disabled={!form.label||!form.dueDate}>Enregistrer</button>
+              <button className="btn" onClick={saveForm} disabled={!form.label||!form.dueDate}>💾 Enregistrer</button>
             </div>
           </div>
         </div>
-      )}
+        );
+      })()}
 
       {/* Confirm suppression */}
       {confirmDel && (
@@ -17936,36 +18270,154 @@ function AlertesSettingsSection(){
 
 function Settings(){
   const {db,mutate,setDb,syncNow,scopedSubIds,scopedAnnexeIds,user}=useApp();
-  const [addProd,setAddProd]=useState(null);
+  const [addProd,setAddProd]=useState(null); // {entityId, annexeId?}
+  const [confirmSwitch,setConfirmSwitch]=useState(null); // annexeId en attente de confirmation de copie
   const subs=db.subsidiaries.filter(s=>user.role==="admin"||user.level==="holding"||scopedSubIds.includes(s.id));
   const annexes=db.annexes.filter(a=>user.role==="admin"||user.level==="holding"||scopedAnnexeIds.includes(a.id));
+
+  // Garde-fou : un produit est verrouillé si des ventes ou du stock existent
+  const prodHasSales=(pid)=>db.sales.some(s=>s.productId===pid);
+  const prodHasStock=(pid)=>db.inventory.some(i=>i.productId===pid);
+  const prodIsLocked=(pid)=>prodHasSales(pid)||prodHasStock(pid);
+
+  // Basculer une filiale en mode "Produits indépendants"
+  const switchToOwn=(ann)=>{
+    const sub=db.subsidiaries.find(s=>s.id===ann.subsidiaryId);
+    const groupProds=db.products.filter(p=>p.subsidiaryId===ann.subsidiaryId&&!p.annexeId);
+    if(groupProds.length>0){
+      setConfirmSwitch({ann,sub,groupProds});
+    } else {
+      mutate(d=>{const i=d.annexes.findIndex(x=>x.id===ann.id);if(i>=0)d.annexes[i].useOwnProducts=true;});
+    }
+  };
+  const switchToInherit=(ann)=>{
+    mutate(d=>{const i=d.annexes.findIndex(x=>x.id===ann.id);if(i>=0)d.annexes[i].useOwnProducts=false;});
+  };
+  const confirmCopyAndSwitch=(copy)=>{
+    const {ann,groupProds}=confirmSwitch;
+    mutate(d=>{
+      const i=d.annexes.findIndex(x=>x.id===ann.id);
+      if(i>=0) d.annexes[i].useOwnProducts=true;
+      if(copy){
+        groupProds.forEach(p=>{
+          d.products.push({...p,id:uid("prd"),subsidiaryId:ann.subsidiaryId,annexeId:ann.id});
+        });
+      }
+    });
+    setConfirmSwitch(null);
+  };
+
   const allEntities=[
     ...subs.map(s=>({id:s.id,code:s.code,name:s.name,kind:s.kind||"tickets",commissionRate:s.commissionRate,type:"subsidiary"})),
-    ...annexes.map(a=>{const sub=db.subsidiaries.find(x=>x.id===a.subsidiaryId);return {id:a.id,code:a.code,name:a.name,kind:a.kind||sub?.kind||"tickets",commissionRate:a.commissionRate||sub?.commissionRate||0,type:"annexe",subName:sub?.name};}).filter(a=>db.products.some(p=>p.subsidiaryId===a.id)||true),
+    ...annexes.map(a=>{const sub=db.subsidiaries.find(x=>x.id===a.subsidiaryId);return {id:a.id,code:a.code,name:a.name,kind:a.kind||sub?.kind||"tickets",commissionRate:a.commissionRate||sub?.commissionRate||0,type:"annexe",subName:sub?.name,useOwnProducts:a.useOwnProducts||false,subsidiaryId:a.subsidiaryId,annObj:a};})
   ];
+
+  const ProductRow=({p,isOwnProd})=>{
+    const locked=prodIsLocked(p.id);
+    const hasSales=prodHasSales(p.id);
+    const hasStock=prodHasStock(p.id);
+    const lockReason=hasSales&&hasStock?"ventes et stock":hasSales?"ventes":hasStock?"stock":"";
+    // isOwnProd=false → produit hérité du groupe, affiché en lecture seule sur la carte filiale
+    const readOnly=!isOwnProd;
+    return (
+      <tr key={p.id}>
+        <td>
+          <span className="dot" style={{background:p.color,marginRight:8}}></span>
+          {(locked||readOnly)
+            ? <b>{p.name}</b>
+            : <input value={p.name} onChange={e=>mutate(d=>{d.products.find(x=>x.id===p.id).name=e.target.value})} style={{fontWeight:700,border:"1px solid var(--line)",borderRadius:6,padding:"3px 7px"}}/>
+          }
+          {locked&&<span className="tag gray" style={{marginLeft:6,fontSize:10}}>🔒 {lockReason}</span>}
+        </td>
+        <td>{readOnly
+          ? <span style={{color:"var(--muted)",fontSize:13}}>{p.unit||""}</span>
+          : <input value={p.unit||""} onChange={e=>mutate(d=>{d.products.find(x=>x.id===p.id).unit=e.target.value})} style={{width:80,padding:"5px 8px",border:"1px solid var(--line)",borderRadius:7}}/>
+        }</td>
+        <td className="right mono">{readOnly
+          ? <span>{p.price.toLocaleString()} F</span>
+          : <><input type="number" value={p.price} onChange={e=>mutate(d=>{d.products.find(x=>x.id===p.id).price=Number(e.target.value)||0})} style={{width:90,textAlign:"right",padding:"5px 8px",border:"1px solid var(--line)",borderRadius:7}}/> F</>
+        }</td>
+        <td><span style={{display:"inline-block",width:24,height:24,borderRadius:6,background:p.color,verticalAlign:"middle"}}/>{!readOnly&&<input type="color" value={p.color} onChange={e=>mutate(d=>{d.products.find(x=>x.id===p.id).color=e.target.value})} style={{width:40,height:28,border:"none",background:"none",verticalAlign:"middle"}}/>}</td>
+        <td className="right">
+          {readOnly
+            ? null
+            : locked
+              ? <span title={`Suppression impossible : ce produit a des ${lockReason}`} style={{cursor:"not-allowed",opacity:.35,fontSize:16}}>🗑</span>
+              : <button className="x" style={{fontSize:16}} onClick={()=>mutate(d=>{d.products=d.products.filter(x=>x.id!==p.id)})}>🗑</button>
+          }
+        </td>
+      </tr>
+    );
+  };
+
   return (
     <div className="grid" style={{gap:16}}>
+      {/* Modal de confirmation de copie */}
+      {confirmSwitch&&(
+        <div className="modal-overlay" onClick={()=>setConfirmSwitch(null)}>
+          <div className="modal-box" style={{maxWidth:460}} onClick={e=>e.stopPropagation()}>
+            <div className="modal-header"><div><h2 style={{margin:0,fontSize:17}}>Passer {confirmSwitch.ann.code} en produits indépendants</h2><p className="muted" style={{margin:"4px 0 0",fontSize:13}}>Le groupe {confirmSwitch.sub?.code} a {confirmSwitch.groupProds.length} produit(s). Voulez-vous en faire une copie comme point de départ ?</p></div></div>
+            <div style={{padding:"0 20px 16px",display:"flex",flexDirection:"column",gap:10}}>
+              <button className="btn" onClick={()=>confirmCopyAndSwitch(true)}>✅ Copier les produits du groupe comme base</button>
+              <button className="btn ghost" onClick={()=>confirmCopyAndSwitch(false)}>📋 Démarrer avec une liste vide</button>
+              <button className="btn ghost" onClick={()=>setConfirmSwitch(null)}>Annuler</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {allEntities.map(ent=>{
-        const prods=db.products.filter(p=>p.subsidiaryId===ent.id);
+        const isAnnexe=ent.type==="annexe";
+        const useOwn=isAnnexe&&ent.useOwnProducts;
+        // Produits à afficher :
+        // - Groupe (subsidiary) → ses propres produits (sans annexeId)
+        // - Filiale indépendante → ses produits propres (annexeId===ent.id)
+        // - Filiale héritée → ses produits propres s'il en a (vestiges d'un ancien mode indépendant),
+        //   sinon vide (les produits du groupe ne sont PAS dupliqués ici)
+        const realSubId = isAnnexe ? ent.subsidiaryId : ent.id;
+        const ownProds = isAnnexe ? db.products.filter(p=>p.annexeId===ent.id) : [];
+        const prods = isAnnexe
+          ? ownProds  // filiale : toujours ses propres produits uniquement
+          : db.products.filter(p=>p.subsidiaryId===realSubId&&!p.annexeId); // groupe
         const unitWord = ent.kind==="goods" ? "produit" : "forfait";
+        const addTarget={entityId:ent.subsidiaryId||ent.id, annexeId:isAnnexe?ent.id:undefined};
         return (
           <div className="card card-pad" key={ent.id}>
             <div className="sec-title">
-              <div><h2 style={{display:"inline"}}>{ent.code}</h2> <span className="muted">· {ent.name}</span> {ent.subName&&<span className="muted" style={{fontSize:12}}>({ent.subName})</span>} <span className={"tag "+(ent.kind==="goods"?"gold":"blue")}>{KIND[ent.kind]}</span></div>
-              <button className="btn sm" onClick={()=>setAddProd(ent.id)}>+ Ajouter un {unitWord}</button>
+              <div>
+                <h2 style={{display:"inline"}}>{ent.code}</h2>
+                <span className="muted"> · {ent.name}</span>
+                {ent.subName&&<span className="muted" style={{fontSize:12}}> ({ent.subName})</span>}
+                <span className={"tag "+(ent.kind==="goods"?"gold":"blue")} style={{marginLeft:6}}>{KIND[ent.kind]}</span>
+                {isAnnexe&&(
+                  <span style={{marginLeft:8}}>
+                    {useOwn
+                      ? <span className="tag green" style={{cursor:"pointer"}} onClick={()=>switchToInherit(ent.annObj)} title="Cliquer pour revenir aux produits du groupe">📋 Produits indépendants</span>
+                      : <span className="tag gray" style={{cursor:"pointer"}} onClick={()=>switchToOwn(ent.annObj)} title="Cliquer pour activer les produits indépendants">🔗 Hérite du groupe</span>
+                    }
+                  </span>
+                )}
+              </div>
+              {/* Bouton ajouter : groupe toujours, filiale seulement si produits indépendants */}
+              {(!isAnnexe||useOwn)&&<button className="btn sm" onClick={()=>setAddProd(addTarget)}>+ Ajouter un {unitWord}</button>}
             </div>
+            {isAnnexe&&!useOwn&&(
+              <div className="help" style={{fontSize:12,marginBottom:8,color:"var(--muted)"}}>
+                {ownProds.length>0
+                  ? <span>⚠️ Produits indépendants conservés (lecture seule) · <span style={{color:"var(--accent)",cursor:"pointer"}} onClick={()=>switchToOwn(ent.annObj)}>Réactiver le mode indépendant →</span></span>
+                  : <span>Catalogue géré par le groupe · <span style={{color:"var(--accent)",cursor:"pointer"}} onClick={()=>switchToOwn(ent.annObj)}>Activer les produits indépendants →</span></span>
+                }
+              </div>
+            )}
+            {prods.length>0 ? (
             <table>
               <thead><tr><th>{ent.kind==="goods"?"Produit":"Forfait"}</th><th>Unité</th><th className="right">Prix</th><th>Couleur</th><th></th></tr></thead>
-              <tbody>{prods.map(p=>(
-                <tr key={p.id}>
-                  <td><span className="dot" style={{background:p.color,marginRight:8}}></span><b>{p.name}</b></td>
-                  <td><input value={p.unit||""} onChange={e=>mutate(d=>{d.products.find(x=>x.id===p.id).unit=e.target.value})} style={{width:80,padding:"5px 8px",border:"1px solid var(--line)",borderRadius:7}}/></td>
-                  <td className="right mono"><input type="number" value={p.price} onChange={e=>mutate(d=>{d.products.find(x=>x.id===p.id).price=Number(e.target.value)||0})} style={{width:90,textAlign:"right",padding:"5px 8px",border:"1px solid var(--line)",borderRadius:7}}/> F</td>
-                  <td><input type="color" value={p.color} onChange={e=>mutate(d=>{d.products.find(x=>x.id===p.id).color=e.target.value})} style={{width:40,height:28,border:"none",background:"none"}}/></td>
-                  <td className="right"><button className="x" style={{fontSize:16}} onClick={()=>mutate(d=>{d.products=d.products.filter(x=>x.id!==p.id)})}>🗑</button></td>
-                </tr>
-              ))}</tbody>
+              {/* Filiale héritée avec produits propres : lecture seule */}
+              <tbody>{prods.map(p=><ProductRow key={p.id} p={p} isOwnProd={useOwn}/>)}</tbody>
             </table>
+            ) : isAnnexe&&!useOwn ? (
+              <p className="muted" style={{fontSize:13,margin:"8px 0 0"}}>Aucun produit indépendant — les vendeurs utilisent le catalogue du groupe.</p>
+            ) : null}
             <div className="muted" style={{fontSize:12,marginTop:10}}>Commission vendeurs : <b>{((ent.commissionRate||0)*100).toFixed(0)}%</b></div>
           </div>
         );
@@ -18007,17 +18459,22 @@ function Settings(){
           )}
         </div>
       )}
-      {addProd && <ProductModal subsidiaryId={addProd} onClose={()=>setAddProd(null)}/>}
+      {addProd && <ProductModal target={addProd} onClose={()=>setAddProd(null)}/>}
     </div>
   );
 }
-function ProductModal({subsidiaryId,onClose}){
+function ProductModal({target,onClose}){
+  // target = {entityId: subsidiaryId, annexeId?: string}
+  const subsidiaryId=target.entityId;
+  const annexeId=target.annexeId||null;
   const {db,mutate}=useApp();
   const sub=db.subsidiaries.find(s=>s.id===subsidiaryId);
+  const ann=annexeId?db.annexes.find(a=>a.id===annexeId):null;
   const [f,setF]=useState({name:"",price:"",unit:sub?.kind==="goods"?"unité":"ticket",color:"#0E7C66"});
-  const save=()=>{ if(!f.name)return; mutate(d=>d.products.push({id:uid("prod"),subsidiaryId,name:f.name,price:Number(f.price)||0,unit:f.unit,color:f.color})); onClose(); };
+  const save=()=>{ if(!f.name)return; mutate(d=>d.products.push({id:uid("prod"),subsidiaryId,annexeId:annexeId||undefined,name:f.name,price:Number(f.price)||0,unit:f.unit,color:f.color})); onClose(); };
+  const label=ann?`${ann.code} (indépendant)`:sub?.code;
   return (
-    <Modal title={`Nouveau produit — ${sub?.code}`} onClose={onClose}
+    <Modal title={`Nouveau produit — ${label}`} onClose={onClose}
       foot={<><button className="btn ghost" onClick={onClose}>Annuler</button><button className="btn" onClick={save}>Ajouter</button></>}>
       <Field label="Nom"><input value={f.name} onChange={e=>setF({...f,name:e.target.value})} placeholder={sub?.kind==="goods"?"Ex : Canette 33cl":"Ex : 12 Heures"}/></Field>
       <div className="row"><div style={{flex:1}}><Field label="Prix (FCFA)"><input type="number" value={f.price} onChange={e=>setF({...f,price:e.target.value})}/></Field></div>
@@ -18605,23 +19062,58 @@ function BulletinRow({b, onPrint, onConfig, isPaid, canPay}) {
 // RAPPORT MENSUEL CONSOLIDÉ
 // ══════════════════════════════════════════════════════════════
 function RapportMensuel() {
-  const {db, user, userScope} = useApp();
+  const {db, user, userScope, nav, scopedAnnexeIds, scopedSubIds} = useApp();
   const isAdmin = user?.role === "admin";
   if(!isAdmin && !hasPerm(db, user, "access:rapport_mensuel")) return <AccessDenied/>;
 
-  // Périmètre autorisé de l'utilisateur (issu du contexte)
+  // Périmètre réactif au nav choisi
+  const navAnx = scopedAnnexeIds || [];
+  const navSubs = scopedSubIds || [];
+  const navSucIds = nav.level==="succursale" ? [nav.id] : (db.succursales||[]).filter(s=>navAnx.includes(s.annexeId)).map(s=>s.id);
   const inScopeS = (s) => {
-    if(isAdmin || userScope.subs.length===0) return true;
-    if(s.succursaleId && userScope.sucIds.includes(s.succursaleId)) return true;
-    if(s.annexeId && userScope.annexes.includes(s.annexeId)) return true;
-    if(s.subsidiaryId && userScope.subs.includes(s.subsidiaryId)) return true;
+    if(nav.level==="holding") return true;
+    // Niveau succursale : ventes de cette succursale uniquement
+    if(nav.level==="succursale"){
+      if(s.succursaleId && navSucIds.includes(s.succursaleId)) return true;
+      // ventes dont annexeId = sucId (vendeur avec succursaleId renseigné)
+      if(s.annexeId && navSucIds.includes(s.annexeId)) return true;
+      // ventes dont vendeur appartient à cette succursale
+      const seller=(db.employees||[]).find(e=>e.id===s.sellerId);
+      if(seller && seller.succursaleId && navSucIds.includes(seller.succursaleId)) return true;
+      return false;
+    }
+    // Niveau annexe : ventes de cette annexe + ses succursales
+    if(nav.level==="annexe"){
+      if(s.succursaleId && navSucIds.includes(s.succursaleId)) return true;
+      if(s.annexeId && navAnx.includes(s.annexeId)) return true;
+      // cas où annexeId est l'id d'une succursale rattachée à cette annexe
+      if(s.annexeId && navSucIds.includes(s.annexeId)) return true;
+      return false;
+    }
+    // Niveau filiale : toutes les annexes + succursales de la filiale
+    if(s.succursaleId && navSucIds.includes(s.succursaleId)) return true;
+    if(s.annexeId && navAnx.includes(s.annexeId)) return true;
+    // cas où annexeId contient l'id d'une succursale (ex: wifi-kara) rattachée à cette filiale
+    if(s.annexeId && navSucIds.includes(s.annexeId)) return true;
+    if(s.subsidiaryId && navSubs.includes(s.subsidiaryId)) return true;
     return false;
   };
   const inScopeE = (e) => {
-    if(isAdmin || userScope.subs.length===0) return true;
-    if(e.succursaleId && userScope.sucIds.includes(e.succursaleId)) return true;
-    if(e.annexeId && userScope.annexes.includes(e.annexeId)) return true;
-    if(e.subsidiaryId && userScope.subs.includes(e.subsidiaryId)) return true;
+    if(nav.level==="holding") return true;
+    if(nav.level==="succursale"){
+      if(e.succursaleId && navSucIds.includes(e.succursaleId)) return true;
+      if(e.annexeId && navSucIds.includes(e.annexeId)) return true;
+      return false;
+    }
+    if(nav.level==="annexe"){
+      if(e.succursaleId && navSucIds.includes(e.succursaleId)) return true;
+      if(e.annexeId && navAnx.includes(e.annexeId)) return true;
+      return false;
+    }
+    if(e.succursaleId && navSucIds.includes(e.succursaleId)) return true;
+    if(e.annexeId && navAnx.includes(e.annexeId)) return true;
+    if(e.annexeId && navSucIds.includes(e.annexeId)) return true;
+    if(e.subsidiaryId && navSubs.includes(e.subsidiaryId)) return true;
     return false;
   };
 
@@ -18630,7 +19122,7 @@ function RapportMensuel() {
   const defaultMonth = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,"0")}`;
   // Lister tous les mois avec des données (ventes ou dépenses) dans le périmètre
   const allMonths = [...new Set([
-    ...(db.sales||[]).filter(inScopeS).map(s=>(s.closedAt||"").slice(0,7)).filter(m=>m),
+    ...(db.sales||[]).filter(inScopeS).map(s=>monthOfWeek(s.week)).filter(m=>m),
     ...(db.expenses||[]).filter(inScopeE).map(e=>(e.date||"").slice(0,7)).filter(m=>m),
   ])].sort().reverse();
   if(!allMonths.includes(defaultMonth)) allMonths.unshift(defaultMonth);
@@ -18638,11 +19130,36 @@ function RapportMensuel() {
   const [month, setMonth] = React.useState(defaultMonth);
 
   // ── Ventes du mois par annexe (dans le périmètre) ──
-  const salesOfMonth = (db.sales||[]).filter(s => inScopeS(s) && (s.closedAt||"").startsWith(month) && s.revenue >= 0);
-  // Grouper par annexe/succursale
+  const salesOfMonth = (db.sales||[]).filter(s => inScopeS(s) && monthOfWeek(s.week) === month && s.revenue >= 0);
+  // Résoudre l'annexe racine d'une vente (pour groupement holding)
+  const _sucById = {};
+  (db.succursales||[]).forEach(suc => _sucById[suc.id] = suc);
+  const _anxById = {};
+  (db.annexes||[]).forEach(a => _anxById[a.id] = a);
+  const saleRootAnxId = (s) => {
+    // si l'annexeId est une vraie annexe → on l'a
+    if(_anxById[s.annexeId]) return s.annexeId;
+    // si l'annexeId est une succursale → remonter à son annexe parente
+    if(_sucById[s.annexeId]) return _sucById[s.annexeId].annexeId || s.annexeId;
+    // sinon chercher via subsidiaryId : prendre la première annexe de cette filiale
+    if(s.subsidiaryId){
+      const anx = (db.annexes||[]).find(a=>a.subsidiaryId===s.subsidiaryId);
+      return anx?.id || s.subsidiaryId;
+    }
+    return s.annexeId || "__global__";
+  };
+  // Grouper : toujours remonter vers l'annexe racine (jamais la succursale)
+  // sauf au niveau succursale où on garde le détail par vendeur/point de vente
   const salesByAnnexe = {};
   salesOfMonth.forEach(s => {
-    const key = s.annexeId || s.succursaleId || s.subsidiaryId || "__global__";
+    let key;
+    if(nav.level==="succursale"){
+      // au niveau succursale : garder le détail annexe/succursale tel quel
+      key = s.annexeId || s.succursaleId || s.subsidiaryId || "__global__";
+    } else {
+      // holding / subsidiary / annexe : remonter vers l'annexe racine
+      key = saleRootAnxId(s);
+    }
     if(!salesByAnnexe[key]) salesByAnnexe[key] = {count:0, revenue:0};
     salesByAnnexe[key].count++;
     salesByAnnexe[key].revenue += Number(s.revenue)||0;
@@ -18666,15 +19183,15 @@ function RapportMensuel() {
   });
   const totalDepenses = expOfMonth.reduce((s,e)=>s+(Number(e.amount)||0), 0);
 
-  // ── Masse salariale du mois (filtrée par périmètre) ──
+  // ── Masse salariale du mois (filtrée par périmètre nav) ──
   const scopeEmpIds = React.useMemo(()=>{
-    if(isAdmin || userScope.subs.length===0) return null;
+    if(nav.level==="holding") return null;
     return (db.employees||[]).filter(e=>
-      (e.succursaleId && userScope.sucIds.includes(e.succursaleId)) ||
-      (e.annexeId && userScope.annexes.includes(e.annexeId)) ||
-      (e.subsidiaryId && userScope.subs.includes(e.subsidiaryId))
+      (e.succursaleId && navSucIds.includes(e.succursaleId)) ||
+      (e.annexeId && navAnx.includes(e.annexeId)) ||
+      (e.subsidiaryId && navSubs.includes(e.subsidiaryId))
     ).map(e=>e.id);
-  },[db,userScope,isAdmin]);
+  },[db,nav,scopedAnnexeIds,scopedSubIds]);
   const filterPayItems = (items) => scopeEmpIds===null ? items : items.filter(p=>scopeEmpIds.includes(p.employeeId||p.id));
   const monthRun = (db.salaryRuns2||[]).find(r=>r.month===month) || {};
   const payItems = filterPayItems(Array.isArray(monthRun.items) ? monthRun.items : []);
@@ -18691,10 +19208,35 @@ function RapportMensuel() {
   const finalCout = hasPaie ? masseSalCout : archiveCout;
   const hasSalaires = hasPaie || archiveMonth.length > 0;
 
-  // ── Soldes caisse / banque ──
+  // ── Soldes caisse / banque (filtrés par périmètre) ──
   const {cash:cashBal, bank:bankBal} = computeBalances(db);
-  const totalCaisse = groupTreasury(db);
-  const totalBanque = Object.values(bankBal||{}).reduce((s,v)=>s+v,0);
+  const totalCaisse = (() => {
+    if(nav.level==="holding") return groupTreasury(db);
+    if(nav.level==="subsidiary") return subTreasury(db, nav.id);
+    if(nav.level==="succursale"){
+      const _suc=(db.succursales||[]).find(s=>s.id===nav.id);
+      return (cashBal[cashKeyOf("succursale",nav.id)]||0) + (cashBal[cashKeyOf("annexe",nav.id)]||0);
+    }
+    // annexe
+    let t = cashBal[cashKeyOf("annexe",nav.id)]||0;
+    (db.succursales||[]).filter(s=>s.annexeId===nav.id).forEach(s=>{
+      t += (cashBal[cashKeyOf("annexe",s.id)]||0) + (cashBal[cashKeyOf("succursale",s.id)]||0);
+    });
+    return t;
+  })();
+  const totalBanque = (() => {
+    if(nav.level==="holding") return Object.values(bankBal||{}).reduce((s,v)=>s+v,0);
+    if(nav.level==="subsidiary") return subBankTreasury(db, nav.id);
+    if(nav.level==="succursale"){
+      return (bankBal[cashKeyOf("succursale",nav.id)]||0) + (bankBal[cashKeyOf("annexe",nav.id)]||0);
+    }
+    // annexe
+    let t = bankBal[cashKeyOf("annexe",nav.id)]||0;
+    (db.succursales||[]).filter(s=>s.annexeId===nav.id).forEach(s=>{
+      t += (bankBal[cashKeyOf("annexe",s.id)]||0) + (bankBal[cashKeyOf("succursale",s.id)]||0);
+    });
+    return t;
+  })();
 
   // ── Impression ──
   function handlePrint() {
@@ -18755,7 +19297,7 @@ function RapportMensuel() {
   }
 
   // ── Rendu ──
-  const surplus = totalVentes - totalDepenses - finalNet;
+  const surplus = totalVentes - totalDepenses;
 
   return (
     <div className="page">
@@ -18791,8 +19333,8 @@ function RapportMensuel() {
         </div>
         <div className="card" style={{padding:"14px 18px"}}>
           <div style={{fontSize:11,textTransform:"uppercase",color:"var(--muted)",letterSpacing:.5}}>Résultat net estimé</div>
-          <div style={{fontSize:22,fontWeight:800,color:surplus>=0?"var(--accent)":"#c0392b",marginTop:4}}>{hasSalaires?fcfa(surplus):"—"}</div>
-          <div style={{fontSize:12,color:"var(--muted)",marginTop:2}}>recettes − dép. − salaires</div>
+          <div style={{fontSize:22,fontWeight:800,color:surplus>=0?"var(--accent)":"#c0392b",marginTop:4}}>{fcfa(surplus)}</div>
+          <div style={{fontSize:12,color:"var(--muted)",marginTop:2}}>recettes − dépenses</div>
         </div>
       </div>
 
@@ -18875,11 +19417,11 @@ function RapportMensuel() {
           <div style={{fontWeight:700,fontSize:15,marginBottom:12}}>🏦 Soldes (situation actuelle)</div>
           <div style={{display:"flex",flexDirection:"column",gap:10}}>
             <div style={{display:"flex",justifyContent:"space-between",padding:"8px 0",borderBottom:"1px solid var(--line)"}}>
-              <span style={{color:"var(--muted)"}}>Caisse (toutes filiales)</span>
+              <span style={{color:"var(--muted)"}}>{nav.level==="holding"?"Caisse (toutes filiales)":nav.level==="subsidiary"?"Caisse consolidée":nav.level==="succursale"?((db.succursales||[]).find(s=>s.id===nav.id)?.code||"Caisse succursale"):(db.annexes||[]).find(a=>a.id===nav.id)?.code||"Caisse"}</span>
               <span style={{fontWeight:700,color:"var(--accent)"}}>{fcfa(totalCaisse)}</span>
             </div>
             <div style={{display:"flex",justifyContent:"space-between",padding:"8px 0",borderBottom:"1px solid var(--line)"}}>
-              <span style={{color:"var(--muted)"}}>Banque (tous comptes)</span>
+              <span style={{color:"var(--muted)"}}>{nav.level==="holding"?"Banque (tous comptes)":"Banque"}</span>
               <span style={{fontWeight:700,color:"#2980b9"}}>{fcfa(totalBanque)}</span>
             </div>
             <div style={{display:"flex",justifyContent:"space-between",padding:"10px 0",borderTop:"2px solid var(--line)",marginTop:4}}>
@@ -18891,7 +19433,7 @@ function RapportMensuel() {
       </div>
 
       <div style={{marginTop:18,padding:"12px 16px",background:"var(--surface2,#f7f6f2)",borderRadius:8,fontSize:13,color:"var(--muted)"}}>
-        ℹ️ <strong>Résultat net estimé</strong> = Recettes − Dépenses − Masse salariale nette ({hasSalaires?fcfa(surplus):"données salariales manquantes"}). Ce chiffre est indicatif et ne tient pas compte des investissements, provisions ou ajustements comptables. Imprimez le rapport pour le partager.
+        ℹ️ <strong>Résultat net estimé</strong> = Recettes − Dépenses (masse salariale incluse dans les dépenses). Ce chiffre est indicatif et ne tient pas compte des investissements, provisions ou ajustements comptables. Imprimez le rapport pour le partager.
       </div>
     </div>
   );
@@ -18901,20 +19443,22 @@ function RapportMensuel() {
 // TABLEAU DE BORD RH — Évolution masse salariale & heures
 // ══════════════════════════════════════════════════════════════
 function RHDashboard() {
-  const {db, nav, subById, annexeById, user, userScope} = useApp();
+  const {db, nav, subById, annexeById, user, userScope, scopedAnnexeIds, scopedSubIds} = useApp();
   const M = useMetrics();
   const isAdmin = user?.role==="admin";
   if(!isAdmin && !hasPerm(db,user,"access:rh_dashboard")) return <AccessDenied/>;
 
-  // ── Périmètre utilisateur (issu du contexte) ────────────────
+  // ── Périmètre réactif au nav ─────────────────────────────────
+  const navAnx = scopedAnnexeIds || [];
+  const navSucIds = nav.level==="succursale" ? [nav.id] : (db.succursales||[]).filter(s=>navAnx.includes(s.annexeId)).map(s=>s.id);
   const scopeEmpIds = React.useMemo(()=>{
-    if(isAdmin || userScope.subs.length===0) return null;
+    if(nav.level==="holding") return null;
     return (db.employees||[]).filter(e=>
-      (e.succursaleId && userScope.sucIds.includes(e.succursaleId)) ||
-      (e.annexeId && userScope.annexes.includes(e.annexeId)) ||
-      (e.subsidiaryId && userScope.subs.includes(e.subsidiaryId))
+      (e.succursaleId && navSucIds.includes(e.succursaleId)) ||
+      (e.annexeId && navAnx.includes(e.annexeId)) ||
+      (e.assignmentId && navAnx.includes(e.assignmentId))
     ).map(e=>e.id);
-  },[db,userScope,isAdmin]);
+  },[db,nav,scopedAnnexeIds]);
   const filterByScope = (items, idField="empId") => scopeEmpIds===null ? items : items.filter(i=>scopeEmpIds.includes(i[idField]||i.id));
 
   // ── Données sources ──────────────────────────────────────────
@@ -19187,9 +19731,38 @@ function RHDashboard() {
 // BANDEAU D'ALERTES GLOBAL
 // ═══════════════════════════════════════════════════════════════
 function useAlertes() {
-  const {db, nav} = useApp();
+  const {db, nav, scopedAnnexeIds, scopedSubIds} = useApp();
   const now = new Date();
   const alerts = [];
+  // Périmètre de navigation pour filtrer les alertes
+  const navAnnexes = scopedAnnexeIds || [];
+  const navSubs    = scopedSubIds    || [];
+  const navSucIds  = nav.level==="succursale"
+    ? [nav.id]
+    : (db.succursales||[]).filter(s=>navAnnexes.includes(s.annexeId)).map(s=>s.id);
+  // Filtre projet par périmètre : annexeId, subsidiaryId, ou succursaleId
+  const inScopeProject = (p) => {
+    if(nav.level==="holding") return true;
+    // Au niveau annexe ou succursale : filtrer UNIQUEMENT par annexeId/succursaleId
+    // Ne pas utiliser subsidiaryId car un groupe peut contenir plusieurs annexes
+    if(nav.level==="annexe"){
+      if(p.annexeId) return navAnnexes.includes(p.annexeId);
+      if(p.succursaleId) return navSucIds.includes(p.succursaleId);
+      return false;
+    }
+    if(nav.level==="succursale"){
+      if(p.succursaleId) return navSucIds.includes(p.succursaleId);
+      if(p.annexeId) return navAnnexes.includes(p.annexeId);
+      return false;
+    }
+    // Au niveau subsidiary : on peut utiliser subsidiaryId
+    if(nav.level==="subsidiary"){
+      if(p.subsidiaryId && navSubs.includes(p.subsidiaryId)) return true;
+      if(p.annexeId && navAnnexes.includes(p.annexeId)) return true;
+      return false;
+    }
+    return false;
+  };
 
   // helper : noms d'annexe/filiale
   const annexeName = (id) => {
@@ -19266,7 +19839,12 @@ function useAlertes() {
   const stockSeuil = Number(db.appSettings?.stockAlertSeuil) || 5;
   if(db.inventory && db.products && db.employees){
     const lowStockItems = [];
-    const sellers = (db.employees||[]).filter(e=>e.role==="vendeur"&&e.status!=="inactive");
+    const sellers = (db.employees||[]).filter(e=>{
+      if(e.role!=="vendeur"||e.active===false) return false;
+      if(nav.level==="holding") return true;
+      if(nav.level==="succursale") return e.succursaleId===nav.id;
+      return e.level==="annexe"&&navAnnexes.includes(e.assignmentId);
+    });
     const products = db.products||[];
     const allWeeks = [...new Set((db.inventory||[]).map(i=>i.week))].sort();
     const lastWeek = allWeeks[allWeeks.length-1];
@@ -19437,7 +20015,12 @@ function useAlertes() {
     const twoWeeksStr = twoWeeksAgo.toISOString().slice(0,10);
     const threeMonthsAgo = new Date(now); threeMonthsAgo.setDate(threeMonthsAgo.getDate()-90);
     const threeMonthsStr = threeMonthsAgo.toISOString().slice(0,10);
-    const activeVendors = (db.employees||[]).filter(e=>e.role==="vendeur"&&e.status!=="inactive");
+    const activeVendors = (db.employees||[]).filter(e=>{
+      if(e.role!=="vendeur"||e.active===false) return false;
+      if(nav.level==="holding") return true;
+      if(nav.level==="succursale") return e.succursaleId===nav.id;
+      return e.level==="annexe"&&navAnnexes.includes(e.assignmentId);
+    });
     const silentVendors = activeVendors.filter(v=>{
       // A eu au moins une clôture dans les 3 derniers mois
       const hadActivity = (db.sales||[]).some(s=>s.sellerId===v.id && s.closedAt && s.closedAt>=threeMonthsStr);
@@ -19504,7 +20087,12 @@ function useAlertes() {
   if(db.missions && db.missions.length > 0){
     const openMissions = (db.missions||[]).filter(m => {
       const s = (m.status||"").toLowerCase();
-      return s !== "validated" && s !== "closed" && s !== "clôturée" && s !== "validée" && s !== "terminée";
+      if(s === "validated" || s === "closed" || s === "clôturée" || s === "validée" || s === "terminée") return false;
+      if(nav.level==="holding") return true;
+      if(nav.level==="annexe") return m.annexeId ? navAnnexes.includes(m.annexeId) : false;
+      if(nav.level==="succursale") return m.annexeId ? navAnnexes.includes(m.annexeId) : false;
+      if(nav.level==="subsidiary") return (m.subsidiaryId && navSubs.includes(m.subsidiaryId)) || (m.annexeId && navAnnexes.includes(m.annexeId));
+      return false;
     });
     if(openMissions.length > 0){
       // Séparer urgentes des normales
@@ -19539,9 +20127,10 @@ function useAlertes() {
   if(db.projects && db.projects.length > 0){
     const todayStr = now.toISOString().slice(0,10);
     const overdueProjects = (db.projects||[]).filter(p => {
+      if(!inScopeProject(p)) return false;
       const s = (p.status||"").toLowerCase();
-      // Exclure les projets déjà terminés ou annulés
-      if(s === "terminé" || s === "termine" || s === "completed" || s === "annulé" || s === "cancelled") return false;
+      // Inclure UNIQUEMENT les projets dont le statut est "en cours"
+      if(s !== "en_cours" && s !== "en cours" && s !== "in_progress") return false;
       // Projet en cours avec due_date dépassée
       return p.dueDate && p.dueDate < todayStr;
     });
@@ -19564,7 +20153,7 @@ function useAlertes() {
         icon:"🏗️",
         label:`${overdueProjects.length} projet${overdueProjects.length>1?"s":""} en retard${critical.length>0?" ("+critical.length+" >30j)":""}`,
         title:"Projets dépassant leur date de fin prévue",
-        desc:`Ces projets sont encore en cours mais ont dépassé leur date de livraison prévue. Les projets en rouge ont plus de 30 jours de retard.`,
+        desc:`Ces projets ont le statut "En cours" et ont dépassé leur date de livraison prévue. Les projets en rouge ont plus de 30 jours de retard. Les projets planifiés, terminés ou annulés ne génèrent pas d'alerte.`,
         route:"projects",
         badge:{ route:"projects", count: overdueProjects.length },
         items
@@ -19572,16 +20161,79 @@ function useAlertes() {
     }
   }
 
-  // ── 10. PERMANENCES non payées ────────────────────────────────
+  // ── 10. PROJETS planifiés ─────────────────────────────────────
+  if(db.projects && db.projects.length > 0){
+    const plannedProjects = (db.projects||[]).filter(p => {
+      if(!inScopeProject(p)) return false;
+      const s = (p.status||"").toLowerCase().replace(/ /g,"_");
+      return s === "planifié" || s === "planifie" || s === "planned" || s === "planifier";
+    });
+    if(plannedProjects.length > 0){
+      const items = plannedProjects.map(p => ({
+        label: p.name || p.id,
+        sub: `${p.dueDate ? "Date prévue : "+p.dueDate : "Pas de date définie"}${p.progress!=null?" · Avancement : "+p.progress+"%":""}`,
+        level: "info"
+      }));
+      alerts.push({
+        id:"projets_planifies",
+        level:"info",
+        icon:"📋",
+        label:`${plannedProjects.length} projet${plannedProjects.length>1?"s":""} planifié${plannedProjects.length>1?"s":""}`,
+        title:"Projets planifiés",
+        desc:`Ces projets ont le statut "Planifié" et sont en attente de démarrage.`,
+        route:"projects",
+        badge:{ route:"projects", count: plannedProjects.length },
+        items
+      });
+    }
+  }
+
+  // ── 11. PROJETS validés ───────────────────────────────────────
+  if(db.projects && db.projects.length > 0){
+    const validatedProjects = (db.projects||[]).filter(p => {
+      if(!inScopeProject(p)) return false;
+      const s = (p.status||"").toLowerCase().replace(/ /g,"_");
+      return s === "validé" || s === "valide" || s === "validated" || s === "approuvé" || s === "approuve";
+    });
+    if(validatedProjects.length > 0){
+      const items = validatedProjects.map(p => ({
+        label: p.name || p.id,
+        sub: `${p.dueDate ? "Date prévue : "+p.dueDate : "Pas de date définie"}${p.progress!=null?" · Avancement : "+p.progress+"%":""}`,
+        level: "ok"
+      }));
+      alerts.push({
+        id:"projets_valides",
+        level:"ok",
+        icon:"✅",
+        label:`${validatedProjects.length} projet${validatedProjects.length>1?"s":""} validé${validatedProjects.length>1?"s":""}`,
+        title:"Projets validés",
+        desc:`Ces projets ont le statut "Validé" et sont prêts à démarrer ou en attente d'exécution.`,
+        route:"projects",
+        badge:{ route:"projects", count: validatedProjects.length },
+        items
+      });
+    }
+  }
+
+  // ── 12. PERMANENCES non payées ────────────────────────────────
   if(db.permanences && db.permanences.length > 0){
     // Permanences terminées (departed_at renseigné) sans paiement associé
     const paidPermanenceIds = new Set((db.permanencePayments||[]).map(p=>p.permanenceId));
     const unpaidPerms = (db.permanences||[]).filter(p => {
-      // Doit être terminée : departedAt ou status "terminée"/"completed"
       const isFinished = p.departedAt || (p.status||"").toLowerCase() === "terminée" || (p.status||"").toLowerCase() === "completed";
       if(!isFinished) return false;
-      // Pas encore payée
-      return !paidPermanenceIds.has(p.id);
+      if(paidPermanenceIds.has(p.id)) return false;
+      if(nav.level==="holding") return true;
+      // Utiliser annexeId directement sur la permanence (plus fiable que passer par l'employé)
+      if(p.annexeId && navAnnexes.includes(p.annexeId)) return true;
+      if(p.succursaleId && navSucIds.includes(p.succursaleId)) return true;
+      // Fallback via employé si pas d'annexeId sur la permanence
+      if(!p.annexeId && !p.succursaleId){
+        const emp = (db.employees||[]).find(e=>e.id===p.employeeId);
+        if(emp && navAnnexes.includes(emp.assignmentId||emp.annexeId)) return true;
+        if(emp && emp.succursaleId && navSucIds.includes(emp.succursaleId)) return true;
+      }
+      return false;
     });
     if(unpaidPerms.length > 0){
       const items = unpaidPerms.map(p => {
@@ -19717,6 +20369,8 @@ const FCM_VAPID_KEY = "BHWz0Sq-RhHojoBh70UbAV5m6hzq-Cesv8OeHC3KGrujSfe8FbzxE4in-
 const FCM_EDGE_URL = "https://gnozuazcvtzogciqrjbr.supabase.co/functions/v1/send-fcm-notification";
 
 async function sendFCMNotif(title, body, data = {}) {
+  // [STANDBY] FCM désactivé — Telegram utilisé à la place. Décommenter pour réactiver.
+  return;
   try {
     const res = await fetch(FCM_EDGE_URL, {
       method: "POST",
@@ -19785,34 +20439,65 @@ function getTgConfig() {
       token:   s.tgToken   || TG_DEFAULT_TOKEN,
       chat:    s.tgChat    || TG_DEFAULT_CHAT,
       enabled: s.tgEnabled !== "false",
-      types:   s.tgTypes   ? JSON.parse(s.tgTypes) : null, // null = tout activé
+      types:   s.tgTypes   ? JSON.parse(s.tgTypes) : null,
     };
   } catch(e) { return { token:TG_DEFAULT_TOKEN, chat:TG_DEFAULT_CHAT, enabled:true, types:null }; }
 }
 
-async function sendTelegram(message, type) {
+// Retourne les destinations supplémentaires filtrées par entité :
+// - événement d'une filiale (annexeId) → bot de la filiale + bot du groupe parent
+// - événement d'un groupe (subId seul)  → bot du groupe uniquement
+// - jamais de cross-contamination entre entités distinctes
+function getEntityTgTargets(annexeId, subId) {
+  const targets = [];
+  try {
+    const db = window.__db;
+    if (!db) return targets;
+    if (annexeId) {
+      // Bot propre de la filiale
+      const ann = (db.annexes||[]).find(a=>a.id===annexeId);
+      if (ann?.tgToken && ann?.tgChat) targets.push({token:ann.tgToken, chat:ann.tgChat});
+      // Bot du groupe PARENT de cette filiale (pas des autres groupes)
+      const parentSub = (db.subsidiaries||[]).find(s=>s.id===ann?.subsidiaryId);
+      if (parentSub?.tgToken && parentSub?.tgChat) targets.push({token:parentSub.tgToken, chat:parentSub.tgChat});
+    } else if (subId) {
+      // Événement au niveau groupe uniquement → bot du groupe seulement
+      const sub = (db.subsidiaries||[]).find(s=>s.id===subId);
+      if (sub?.tgToken && sub?.tgChat) targets.push({token:sub.tgToken, chat:sub.tgChat});
+    }
+  } catch(e) {}
+  return targets;
+}
+
+async function sendTelegram(message, type, annexeId, subId) {
   const cfg = getTgConfig();
   if (!cfg.enabled) return;
   if (type && cfg.types && !cfg.types.includes(type)) return;
-  if (!cfg.token || !cfg.chat) return;
   // Ajouter la signature utilisateur + horodatage
   const u = window._currentUser;
   const who = u ? `${u.name||u.login||"?"} (${u.role||"?"})` : null;
   const now = new Date().toLocaleTimeString("fr-FR",{hour:"2-digit",minute:"2-digit"});
   const footer = [who ? `👤 ${who}` : null, `🕐 ${now}`].filter(Boolean).join("  •  ");
   const fullMsg = `${message}\n\n<i>${footer}</i>`;
-  const url = `https://api.telegram.org/bot${cfg.token}/sendMessage`;
-  try {
-    await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chat_id: cfg.chat, text: fullMsg, parse_mode: "HTML" }),
-    });
-  } catch(e) { console.warn("[Telegram] Erreur envoi:", e); }
+  // Destinations : bot global de l'app (toujours) + bot(s) propres des entités (en parallèle)
+  const destinations = [];
+  if (cfg.token && cfg.chat) destinations.push({token:cfg.token, chat:cfg.chat});
+  getEntityTgTargets(annexeId, subId).forEach(t=>{
+    // Éviter le doublon si l'entité a le même token que le global
+    if (t.token!==cfg.token || t.chat!==cfg.chat) destinations.push(t);
+  });
+  await Promise.allSettled(destinations.map(({token,chat})=>
+    fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({chat_id:chat, text:fullMsg, parse_mode:"HTML"}),
+    }).catch(e=>console.warn("[Telegram] Erreur envoi:",e))
+  ));
 }
 
 function useFCM(userId) {
   React.useEffect(() => {
+    // [STANDBY] FCM désactivé — Telegram utilisé à la place
+    return;
     if (!userId) return;
     if (typeof firebase === "undefined" || !firebase.messaging) return;
     if (!("serviceWorker" in navigator)) return;
@@ -19854,16 +20539,10 @@ function useNotifPush() {
   const prevRef = React.useRef([]);
   const permRef = React.useRef(null); // "granted"|"denied"|"default"|null
 
-  // Demander la permission au montage (silencieux si déjà granted/denied)
+  // [STANDBY] Demande de permission désactivée — FCM en standby, Telegram utilisé à la place
   React.useEffect(()=>{
     if(!("Notification" in window)) return;
-    if(Notification.permission === "granted"){
-      permRef.current = "granted";
-    } else if(Notification.permission !== "denied"){
-      Notification.requestPermission().then(p=>{ permRef.current = p; });
-    } else {
-      permRef.current = "denied";
-    }
+    permRef.current = Notification.permission === "granted" ? "granted" : "denied";
   }, []);
 
   // Détecter les nouvelles alertes (présentes maintenant, absentes avant)
