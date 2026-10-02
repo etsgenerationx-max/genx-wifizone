@@ -1091,7 +1091,7 @@ function printDocument({title,subtitle,scope,period,body,signatures,landscape,wi
     th{background:#0E7C66;color:#fff;text-align:left;padding:7px 9px;font-size:8.5pt;text-transform:uppercase;letter-spacing:0.4px;}
     td{padding:6px 9px;border-bottom:1px solid #E2DED5;}
     tr:nth-child(even) td{background:#F7F6F2;}
-    tfoot td{background:#0B1A2A!important;color:#fff;font-weight:700;border:none;}
+    tfoot td{background:#EBF8F3!important;color:#0A4A38;font-weight:800;border:none;border-top:2px solid #0E7C66;}
     .right{text-align:right;}
     .mono{font-variant-numeric:tabular-nums;}
     .kpis{display:flex;gap:10px;margin:12px 0;}
@@ -10545,16 +10545,191 @@ function PartnerDivRow({p,dividend,paid,canPayDividend,canViewReleve,payDividend
       return {name:entityName(z),pct:z.sharePercent,startDate:z.startDate||"—",zRevs,zExp,zBen,zDiv};
     });
     const totalDiv=rows.reduce((t,r)=>t+r.zDiv,0);
-    const bodyHtml=`
-      <div class="kpis">
-        <div class="kpi"><div class="l">Recettes</div><div class="v">${rows.reduce((t,r)=>t+r.zRevs,0).toLocaleString("fr-FR")} F</div></div>
-        <div class="kpi"><div class="l">Dépenses</div><div class="v" style="color:#c0392b">${rows.reduce((t,r)=>t+r.zExp,0).toLocaleString("fr-FR")} F</div></div>
-        <div class="kpi"><div class="l">Total dividendes</div><div class="v">${Math.round(totalDiv).toLocaleString("fr-FR")} F</div></div>
-      </div>
-      <table><thead><tr><th>Entité</th><th>Depuis</th><th class="right">Part (%)</th><th class="right">Recettes</th><th class="right">Dépenses</th><th class="right">Bénéfice</th><th class="right">Dividende</th></tr></thead>
-      <tbody>${rows.map(r=>`<tr><td>${r.name}</td><td class="muted">${r.startDate}</td><td class="right">${r.pct}%</td><td class="right mono">${r.zRevs.toLocaleString("fr-FR")} F</td><td class="right mono">${r.zExp.toLocaleString("fr-FR")} F</td><td class="right mono" style="color:${r.zBen>=0?"#1D9E75":"#c0392b"}">${r.zBen.toLocaleString("fr-FR")} F</td><td class="right mono" style="font-weight:700;color:#0E7C66">${Math.round(r.zDiv).toLocaleString("fr-FR")} F</td></tr>`).join("")}</tbody>
-      <tfoot><tr><td colspan="6">Total dividendes à distribuer</td><td class="right mono">${Math.round(totalDiv).toLocaleString("fr-FR")} F</td></tr></tfoot></table>`;
-    printDocument({title:`Relevé de dividendes — ${p.name}`,subtitle:`Investisseur · ${invZones.length} zone(s)`,scope:"Section Investisseurs",period:periodLabel_,body:bodyHtml});
+    const totalRevs=rows.reduce((t,r)=>t+r.zRevs,0);
+    const totalExps=rows.reduce((t,r)=>t+r.zExp,0);
+    const totalBen=rows.reduce((t,r)=>t+r.zBen,0);
+    const fmt=n=>Math.round(n).toLocaleString("fr-FR");
+    const companyName=document.body.dataset.printCompany||"GENERATION X";
+    const tagline=document.body.dataset.printTagline||"Holding — gestion multi-filiales";
+    const footer=document.body.dataset.printFooter||"GENERATION X · Document officiel";
+    const logoSrc=document.body.dataset.printLogo||db.appSettings?.printLogo||GX_LOGO||"";
+    const brandMarkHtml=logoSrc
+      ? `<img src="${logoSrc}" style="width:48px;height:48px;border-radius:11px;object-fit:contain;border:2px solid #0E7C66;" alt="logo"/>`
+      : `<div class="brand-mark">GX</div>`;
+    const dateDoc=new Date().toLocaleDateString("fr-FR",{day:"2-digit",month:"long",year:"numeric"});
+    const refReleve="REL-"+periodLabel_.replace(/\s/g,"-").toUpperCase()+"-"+p.id.slice(-4).toUpperCase();
+    const win=window.open("","_blank");
+    if(!win){alert("Autorisez les pop-ups pour imprimer.");return;}
+    const html=`<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8">
+<title>Relevé de dividendes — ${esc(p.name)}</title>
+<style>
+  @page{size:A4;margin:12mm 14mm;}
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{font-family:'Helvetica Neue',Arial,sans-serif;color:#0B1A2A;font-size:10pt;line-height:1.6;background:#fff;}
+  .header{display:flex;justify-content:space-between;align-items:flex-start;padding-bottom:12px;border-bottom:4px solid #0E7C66;margin-bottom:20px;}
+  .brand-block{display:flex;align-items:center;gap:12px;}
+  .brand-mark{width:48px;height:48px;border-radius:11px;background:#EBF8F3;border:2px solid #0E7C66;color:#0A4A38;font-weight:900;font-size:18px;display:flex;align-items:center;justify-content:center;flex-shrink:0;}
+  .brand-name{font-size:18pt;font-weight:900;letter-spacing:-0.5px;line-height:1.1;}
+  .brand-tag{font-size:8.5pt;color:#6B7785;margin-top:2px;}
+  .doc-ref{text-align:right;font-size:9pt;color:#6B7785;line-height:1.8;}
+  .doc-ref strong{color:#0B1A2A;font-size:10pt;}
+  .doc-title-band{background:#EBF8F3;border-left:5px solid #0E7C66;color:#0A4A38;padding:9px 16px;border-radius:0 8px 8px 0;margin-bottom:18px;display:flex;justify-content:space-between;align-items:center;}
+  .doc-title-band h1{font-size:12.5pt;font-weight:800;letter-spacing:0.4px;text-transform:uppercase;color:#0A4A38;}
+  .doc-title-band .periode{font-size:9.5pt;color:#0E7C66;font-weight:600;}
+  .benef-box{background:#EBF8F3;border:1px solid #A7D9C8;border-radius:10px;padding:12px 16px;margin-bottom:16px;display:flex;justify-content:space-between;align-items:center;}
+  .benef-label{font-size:8pt;text-transform:uppercase;letter-spacing:.6px;color:#0A7055;font-weight:700;}
+  .benef-name{font-size:13pt;font-weight:900;color:#0B1A2A;margin-top:2px;}
+  .benef-pct{text-align:right;}
+  .pct-val{font-size:20pt;font-weight:900;color:#0E7C66;line-height:1;}
+  .pct-lbl{font-size:8pt;color:#0A7055;text-transform:uppercase;letter-spacing:.5px;}
+  /* KPIs */
+  .kpis{display:flex;gap:10px;margin-bottom:16px;}
+  .kpi{flex:1;border:1px solid #A7D9C8;border-radius:8px;padding:10px 12px;background:#EBF8F3;}
+  .kpi .l{font-size:7.5pt;text-transform:uppercase;color:#0A7055;letter-spacing:.5px;font-weight:700;}
+  .kpi .v{font-size:12pt;font-weight:800;margin-top:3px;}
+  /* Tableau détail */
+  .sec-title{font-size:8.5pt;text-transform:uppercase;letter-spacing:.6px;color:#0A7055;font-weight:700;margin-bottom:8px;padding-bottom:6px;border-bottom:2px solid #A7D9C8;}
+  table{width:100%;border-collapse:collapse;font-size:9pt;margin-bottom:16px;}
+  th{background:#EBF8F3;color:#0A4A38;text-align:left;padding:7px 10px;font-size:8pt;text-transform:uppercase;letter-spacing:.4px;border-bottom:2px solid #0E7C66;}
+  th.right,td.right{text-align:right;}
+  td{padding:8px 10px;border-bottom:1px solid #E8EDF2;}
+  tr:nth-child(even) td{background:#F5FCF9;}
+  .pos{color:#0E7C66;font-weight:700;}
+  .neg{color:#c0392b;font-weight:700;}
+  tfoot td{background:#EBF8F3!important;color:#0A4A38;font-weight:800;border:none;border-top:2px solid #0E7C66;padding:9px 10px;}
+  /* Bloc montant */
+  .amount-block{border:2px solid #A7D9C8;border-radius:12px;background:#EBF8F3;padding:18px 22px;margin-bottom:18px;display:flex;justify-content:space-between;align-items:center;}
+  .amount-block .lbl{font-size:8.5pt;text-transform:uppercase;letter-spacing:.8px;color:#0A7055;font-weight:700;}
+  .amount-block .montant{font-size:24pt;font-weight:900;letter-spacing:-0.5px;margin-top:3px;line-height:1;color:#0A4A38;}
+  .amount-block .ref-small{font-size:8pt;color:#6B7785;margin-top:5px;}
+  .amount-block .right-col{text-align:right;}
+  .amount-block .date-lbl{font-size:8pt;color:#0A7055;}
+  .amount-block .date-val{font-size:10.5pt;font-weight:700;margin-top:3px;color:#0A4A38;}
+  /* Signatures */
+  .sig-row{display:flex;gap:20px;margin-top:22px;}
+  .sig-col{flex:1;border:1px solid #A7D9C8;border-radius:8px;padding:10px 12px;background:#EBF8F3;}
+  .sig-col-title{font-size:8pt;font-weight:700;color:#0A7055;margin-bottom:2px;}
+  .sig-col-name{font-weight:800;font-size:9.5pt;color:#0B1A2A;}
+  .sig-line{border-bottom:1px solid #0E7C66;margin:38px 0 6px;}
+  .sig-note{font-size:7.5pt;color:#9AA5B4;}
+  .doc-foot{margin-top:20px;padding-top:8px;border-top:1px solid #A7D9C8;color:#9AA5B4;font-size:7pt;text-align:center;}
+  @media print{.no-print{display:none;}body{-webkit-print-color-adjust:exact;print-color-adjust:exact;}}
+</style></head><body>
+
+<div class="header">
+  <div class="brand-block">
+    ${brandMarkHtml}
+    <div>
+      <div class="brand-name">${esc(companyName)}</div>
+      <div class="brand-tag">${esc(tagline)}</div>
+    </div>
+  </div>
+  <div class="doc-ref">
+    <div>Référence : <strong>${esc(refReleve)}</strong></div>
+    <div>Date d'émission : <strong>${dateDoc}</strong></div>
+    <div style="margin-top:4px;color:#0E7C66;font-weight:700">RELEVÉ OFFICIEL</div>
+  </div>
+</div>
+
+<div class="doc-title-band">
+  <h1>Relevé de Dividendes par Zone d'Investissement</h1>
+  <span class="periode">Période : ${esc(periodLabel_)}</span>
+</div>
+
+<div class="benef-box">
+  <div>
+    <div class="benef-label">Investisseur / Partenaire</div>
+    <div class="benef-name">${esc(p.name)}</div>
+    <div style="font-size:8.5pt;color:#6B7785;margin-top:3px;">${invZones.length>0?invZones.length+" zone(s) d'investissement":"Participation globale"}</div>
+  </div>
+  <div class="benef-pct">
+    <div class="pct-val">${p.sharePct}%</div>
+    <div class="pct-lbl">Part au capital</div>
+  </div>
+</div>
+
+<div class="kpis">
+  <div class="kpi"><div class="l">Recettes totales</div><div class="v" style="color:#0B1A2A">${fmt(totalRevs)} F CFA</div></div>
+  <div class="kpi"><div class="l">Charges totales</div><div class="v" style="color:#c0392b">${fmt(totalExps)} F CFA</div></div>
+  <div class="kpi"><div class="l">Bénéfice net</div><div class="v" style="color:${totalBen>=0?"#0E7C66":"#c0392b"}">${fmt(totalBen)} F CFA</div></div>
+</div>
+
+<div class="sec-title">Détail par zone d'investissement</div>
+<table>
+  <thead>
+    <tr>
+      <th>Zone / Entité</th>
+      <th>Depuis</th>
+      <th class="right">Part (%)</th>
+      <th class="right">Recettes</th>
+      <th class="right">Charges</th>
+      <th class="right">Bénéfice</th>
+      <th class="right">Dividende</th>
+    </tr>
+  </thead>
+  <tbody>
+    ${rows.map(r=>`<tr>
+      <td><b>${esc(r.name)}</b></td>
+      <td style="color:#6B7785;font-size:8.5pt">${r.startDate}</td>
+      <td class="right">${r.pct}%</td>
+      <td class="right" style="font-variant-numeric:tabular-nums">${fmt(r.zRevs)} F</td>
+      <td class="right" style="font-variant-numeric:tabular-nums;color:#c0392b">${fmt(r.zExp)} F</td>
+      <td class="right ${r.zBen>=0?"pos":"neg"}">${fmt(r.zBen)} F</td>
+      <td class="right pos" style="font-size:10pt">${fmt(r.zDiv)} F</td>
+    </tr>`).join("")}
+  </tbody>
+  <tfoot>
+    <tr>
+      <td colspan="3"><b>TOTAL</b></td>
+      <td class="right">${fmt(totalRevs)} F</td>
+      <td class="right">${fmt(totalExps)} F</td>
+      <td class="right">${fmt(totalBen)} F</td>
+      <td class="right" style="font-size:11pt">${fmt(totalDiv)} F CFA</td>
+    </tr>
+  </tfoot>
+</table>
+
+<div class="amount-block">
+  <div>
+    <div class="lbl">Total dividendes dus — ${esc(periodLabel_)}</div>
+    <div class="montant">${fmt(totalDiv)} F CFA</div>
+    <div class="ref-small">Réf. ${esc(refReleve)} · ${invZones.length>0?invZones.length+" zone(s)":"Participation globale"}</div>
+  </div>
+  <div class="right-col">
+    <div class="date-lbl">Date d'émission</div>
+    <div class="date-val">${dateDoc}</div>
+  </div>
+</div>
+
+<div class="sig-row">
+  <div class="sig-col">
+    <div class="sig-col-title">L'investisseur</div>
+    <div class="sig-col-name">${esc(p.name)}</div>
+    <div class="sig-line"></div>
+    <div class="sig-note">Signature et date</div>
+  </div>
+  <div class="sig-col">
+    <div class="sig-col-title">La Direction Générale</div>
+    <div class="sig-col-name">${esc(companyName)}</div>
+    <div class="sig-line"></div>
+    <div class="sig-note">Signature, cachet et date</div>
+  </div>
+  <div class="sig-col">
+    <div class="sig-col-title">Accusé de réception</div>
+    <div class="sig-col-name">Paiement effectué le</div>
+    <div class="sig-line"></div>
+    <div class="sig-note">Mode de paiement</div>
+  </div>
+</div>
+
+<div class="doc-foot">${esc(footer)} · Réf. ${esc(refReleve)} · ${dateDoc}</div>
+<div class="no-print" style="text-align:center;margin-top:18px;">
+  <button onclick="window.print()" style="background:#0E7C66;color:#fff;border:none;padding:10px 26px;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer;">⎙ Imprimer / Enregistrer en PDF</button>
+</div>
+<script>window.onload=function(){setTimeout(function(){window.print();},350);};<\/script>
+</body></html>`;
+    win.document.write(html);
+    win.document.close();
   };
 
   return (
@@ -10838,21 +11013,170 @@ function Investisseurs(){
 
   // Impression bulletin dividende
   const printDividend=(p,dividend,ref)=>{
-    const body=`
-      <table style="width:100%;border-collapse:collapse;font-size:11pt;">
-        <tr><td style="width:40%;padding:8px;font-weight:700;border-bottom:1px solid #eee">Partenaire</td><td style="padding:8px;border-bottom:1px solid #eee"><b>${esc(p.name)}</b></td></tr>
-        <tr><td style="padding:8px;font-weight:700;border-bottom:1px solid #eee">Part au capital</td><td style="padding:8px;border-bottom:1px solid #eee"><b>${p.sharePct}%</b></td></tr>
-        <tr><td style="padding:8px;font-weight:700;border-bottom:1px solid #eee">Période</td><td style="padding:8px;border-bottom:1px solid #eee">${esc(prettyMonth(calcMonth))}</td></tr>
-        <tr><td style="padding:8px;font-weight:700;border-bottom:1px solid #eee">Recettes du mois</td><td style="padding:8px;border-bottom:1px solid #eee">${fcfa(totalRevenue)}</td></tr>
-        <tr><td style="padding:8px;font-weight:700;border-bottom:1px solid #eee">Dépenses du mois</td><td style="padding:8px;border-bottom:1px solid #eee">${fcfa(monthExpenses)}</td></tr>
-        <tr><td style="padding:8px;font-weight:700;border-bottom:1px solid #eee">Bénéfice net</td><td style="padding:8px;border-bottom:1px solid #eee"><b>${fcfa(netProfit)}</b></td></tr>
-        <tr style="background:#e9f6f1"><td style="padding:12px;font-weight:800;font-size:13pt">DIVIDENDE DÛ</td><td style="padding:12px;font-weight:800;font-size:16pt;color:#0E7C66">${fcfa(Math.round(dividend))}</td></tr>
-      </table>
-      <div style="display:flex;gap:30px;margin-top:30px;">
-        <div style="flex:1;border-top:1px solid #0B1A2A;padding-top:8px;font-size:10pt;"><div>Signature du partenaire</div><div style="margin-top:40px;font-weight:700">${esc(p.name)}</div></div>
-        <div style="flex:1;border-top:1px solid #0B1A2A;padding-top:8px;font-size:10pt;"><div>La Direction</div><div style="margin-top:40px;"></div></div>
-      </div>`;
-    printDocument({title:"Bulletin de dividende",subtitle:`${esc(p.name)} · ${esc(prettyMonth(calcMonth))}`,scope:"",period:`Réf: ${ref}`,body,signatures:[]});
+    const companyName=document.body.dataset.printCompany||"GENERATION X";
+    const tagline=document.body.dataset.printTagline||"Holding — gestion multi-filiales";
+    const footer=document.body.dataset.printFooter||"GENERATION X · Document officiel";
+    const logoSrc=document.body.dataset.printLogo||db.appSettings?.printLogo||GX_LOGO||"";
+    const brandMarkHtml=logoSrc
+      ? `<img src="${logoSrc}" style="width:52px;height:52px;border-radius:12px;object-fit:contain;border:2px solid #0E7C66;" alt="logo"/>`
+      : `<div class="brand-mark">GX</div>`;
+    const periode=prettyMonth(calcMonth);
+    const now=new Date();
+    const dateDoc=now.toLocaleDateString("fr-FR",{day:"2-digit",month:"long",year:"numeric"});
+    // Montant en lettres (simple, FCFA)
+    const fmt=n=>n.toLocaleString("fr-FR");
+    const win=window.open("","_blank");
+    if(!win){alert("Autorisez les pop-ups pour imprimer.");return;}
+    const html=`<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8">
+<title>Bulletin de dividende — ${esc(p.name)}</title>
+<style>
+  @page{size:A4;margin:14mm 16mm;}
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{font-family:'Helvetica Neue',Arial,sans-serif;color:#0B1A2A;font-size:10.5pt;line-height:1.6;background:#fff;}
+  /* ── EN-TÊTE ── */
+  .header{display:flex;justify-content:space-between;align-items:flex-start;padding-bottom:14px;border-bottom:4px solid #0E7C66;margin-bottom:22px;}
+  .brand-block{display:flex;align-items:center;gap:13px;}
+  .brand-mark{width:52px;height:52px;border-radius:12px;background:#EBF8F3;border:2px solid #0E7C66;color:#0A4A38;font-weight:900;font-size:20px;display:flex;align-items:center;justify-content:center;letter-spacing:-1px;flex-shrink:0;}
+  .brand-name{font-size:19pt;font-weight:900;letter-spacing:-0.5px;line-height:1.1;color:#0A4A38;}
+  .brand-tag{font-size:8.5pt;color:#0A7055;margin-top:2px;}
+  .doc-ref{text-align:right;font-size:9pt;color:#0A7055;line-height:1.8;}
+  .doc-ref strong{color:#0A4A38;font-size:10pt;}
+  /* ── TITRE DOCUMENT ── */
+  .doc-title-band{background:#EBF8F3;border-left:5px solid #0E7C66;color:#0A4A38;padding:10px 16px;border-radius:0 8px 8px 0;margin-bottom:20px;display:flex;justify-content:space-between;align-items:center;}
+  .doc-title-band h1{font-size:13pt;font-weight:800;letter-spacing:0.5px;text-transform:uppercase;color:#0A4A38;}
+  .doc-title-band .periode{font-size:10pt;color:#0E7C66;font-weight:600;}
+  /* ── BÉNÉFICIAIRE ── */
+  .benef-box{background:#EBF8F3;border:1px solid #A7D9C8;border-radius:10px;padding:14px 18px;margin-bottom:18px;display:flex;justify-content:space-between;align-items:center;}
+  .benef-label{font-size:8.5pt;text-transform:uppercase;letter-spacing:.6px;color:#0A7055;font-weight:700;}
+  .benef-name{font-size:14pt;font-weight:900;color:#0A4A38;margin-top:2px;}
+  .benef-pct{text-align:right;}
+  .pct-val{font-size:22pt;font-weight:900;color:#0E7C66;line-height:1;}
+  .pct-lbl{font-size:8.5pt;color:#0A7055;text-transform:uppercase;letter-spacing:.5px;}
+  /* ── TABLEAU FINANCIER ── */
+  .fin-table{width:100%;border-collapse:collapse;margin-bottom:18px;font-size:10pt;}
+  .fin-table .section-head td{background:#EBF8F3;font-weight:800;font-size:8.5pt;text-transform:uppercase;letter-spacing:.5px;color:#0A4A38;padding:8px 12px;border-bottom:2px solid #0E7C66;}
+  .fin-table td{padding:9px 12px;border-bottom:1px solid #A7D9C8;}
+  .fin-table .label{color:#0A4A38;width:55%;}
+  .fin-table .val{text-align:right;font-weight:600;font-variant-numeric:tabular-nums;color:#0A4A38;}
+  .fin-table .total-row td{background:#F5FCF9;font-weight:800;color:#0A4A38;border-top:2px solid #A7D9C8;}
+  .fin-table .net-row td{background:#EBF8F3;font-weight:800;color:#0E7C66;border-top:2px solid #0E7C66;}
+  /* ── MONTANT PRINCIPAL ── */
+  .amount-block{border:2px solid #A7D9C8;border-radius:12px;background:#EBF8F3;padding:20px 24px;margin-bottom:22px;display:flex;justify-content:space-between;align-items:center;}
+  .amount-block .lbl{font-size:9pt;text-transform:uppercase;letter-spacing:.8px;color:#0A7055;font-weight:700;}
+  .amount-block .montant{font-size:26pt;font-weight:900;letter-spacing:-0.5px;margin-top:4px;line-height:1;color:#0A4A38;}
+  .amount-block .ref-small{font-size:8.5pt;color:#0A7055;margin-top:6px;}
+  .amount-block .right-col{text-align:right;}
+  .amount-block .date-lbl{font-size:8.5pt;color:#0A7055;}
+  .amount-block .date-val{font-size:11pt;font-weight:700;margin-top:3px;color:#0A4A38;}
+  /* ── SIGNATURES ── */
+  .sig-section{margin-top:28px;}
+  .sig-title{font-size:8.5pt;text-transform:uppercase;letter-spacing:.6px;color:#6B7785;font-weight:700;margin-bottom:14px;padding-bottom:6px;border-bottom:1px solid #E2DED5;}
+  .sig-row{display:flex;gap:24px;}
+  .sig-col{flex:1;background:#EBF8F3;border:1px solid #A7D9C8;border-radius:8px;padding:12px 14px;}
+  .sig-col-title{font-size:8.5pt;font-weight:700;color:#0A7055;margin-bottom:4px;}
+  .sig-col-name{font-weight:800;font-size:10pt;color:#0A4A38;margin-top:2px;}
+  .sig-line{border-bottom:1px solid #0E7C66;margin:44px 0 8px;}
+  .sig-note{font-size:8pt;color:#0A7055;}
+  /* ── PIED ── */
+  .doc-foot{margin-top:24px;padding-top:10px;border-top:1px solid #A7D9C8;color:#0A7055;font-size:7.5pt;text-align:center;}
+  .mention{background:#FFF8E1;border:1px solid #F6D860;border-radius:6px;padding:8px 12px;font-size:8.5pt;color:#7B5E00;margin-bottom:18px;}
+  @media print{.no-print{display:none;}body{-webkit-print-color-adjust:exact;print-color-adjust:exact;}}
+</style></head><body>
+
+<!-- EN-TÊTE -->
+<div class="header">
+  <div class="brand-block">
+    ${brandMarkHtml}
+    <div>
+      <div class="brand-name">${esc(companyName)}</div>
+      <div class="brand-tag">${esc(tagline)}</div>
+    </div>
+  </div>
+  <div class="doc-ref">
+    <div>Référence : <strong>${esc(ref)}</strong></div>
+    <div>Date d'émission : <strong>${dateDoc}</strong></div>
+    <div style="margin-top:4px;color:#0E7C66;font-weight:700">DOCUMENT OFFICIEL</div>
+  </div>
+</div>
+
+<!-- TITRE -->
+<div class="doc-title-band">
+  <h1>Bulletin de Distribution de Dividendes</h1>
+  <span class="periode">Période : ${esc(periode)}</span>
+</div>
+
+<!-- BÉNÉFICIAIRE -->
+<div class="benef-box">
+  <div>
+    <div class="benef-label">Bénéficiaire</div>
+    <div class="benef-name">${esc(p.name)}</div>
+  </div>
+  <div class="benef-pct">
+    <div class="pct-val">${p.sharePct}%</div>
+    <div class="pct-lbl">Part au capital</div>
+  </div>
+</div>
+
+<!-- TABLEAU FINANCIER -->
+<table class="fin-table">
+  <tr class="section-head"><td colspan="2">Résultats financiers — ${esc(periode)}</td></tr>
+  <tr><td class="label">Chiffre d'affaires (recettes brutes)</td><td class="val">${fmt(totalRevenue)} F CFA</td></tr>
+  <tr><td class="label">Charges et dépenses de la période</td><td class="val">(${fmt(monthExpenses)}) F CFA</td></tr>
+  <tr class="net-row"><td class="label">Résultat net distribuable</td><td class="val">${fmt(netProfit)} F CFA</td></tr>
+</table>
+
+<!-- MONTANT DU DIVIDENDE -->
+<div class="amount-block">
+  <div>
+    <div class="lbl">Dividende net à percevoir</div>
+    <div class="montant">${fmt(Math.round(dividend))} F CFA</div>
+    <div class="ref-small">Calculé sur la base de la quote-part de ${p.sharePct}% du résultat net</div>
+  </div>
+  <div class="right-col">
+    <div class="date-lbl">Date de paiement</div>
+    <div class="date-val">${dateDoc}</div>
+  </div>
+</div>
+
+<!-- MENTION LÉGALE -->
+<div class="mention">
+  ⚠️ Ce bulletin atteste le droit au dividende du bénéficiaire pour la période indiquée. Le montant est calculé proportionnellement à la quote-part détenue dans le capital social de ${esc(companyName)}, sur la base du résultat net de la période.
+</div>
+
+<!-- SIGNATURES -->
+<div class="sig-section">
+  <div class="sig-title">Signatures — Pour valider ce document, les deux parties doivent apposer leur signature</div>
+  <div class="sig-row">
+    <div class="sig-col">
+      <div class="sig-col-title">Le bénéficiaire</div>
+      <div class="sig-col-name">${esc(p.name)}</div>
+      <div class="sig-line"></div>
+      <div class="sig-note">Signature et date</div>
+    </div>
+    <div class="sig-col">
+      <div class="sig-col-title">La Direction Générale</div>
+      <div class="sig-col-name">${esc(companyName)}</div>
+      <div class="sig-line"></div>
+      <div class="sig-note">Signature, cachet et date</div>
+    </div>
+    <div class="sig-col">
+      <div class="sig-col-title">Accusé de réception</div>
+      <div class="sig-col-name">Paiement effectué le</div>
+      <div class="sig-line"></div>
+      <div class="sig-note">Mode de paiement</div>
+    </div>
+  </div>
+</div>
+
+<div class="doc-foot">${esc(footer)} · Réf. ${esc(ref)} · ${dateDoc}</div>
+
+<div class="no-print" style="text-align:center;margin-top:20px;">
+  <button onclick="window.print()" style="background:#0E7C66;color:#fff;border:none;padding:11px 28px;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer;">⎙ Imprimer / Enregistrer en PDF</button>
+</div>
+<script>window.onload=function(){setTimeout(function(){window.print();},350);};<\/script>
+</body></html>`;
+    win.document.write(html);
+    win.document.close();
   };
 
   const payDividend=(p,preCalcDividend)=>{
@@ -18271,6 +18595,7 @@ function AlertesSettingsSection(){
 function Settings(){
   const {db,mutate,setDb,syncNow,scopedSubIds,scopedAnnexeIds,user}=useApp();
   const [addProd,setAddProd]=useState(null); // {entityId, annexeId?}
+  const [editProd,setEditProd]=useState(null); // produit à modifier
   const [confirmSwitch,setConfirmSwitch]=useState(null); // annexeId en attente de confirmation de copie
   const subs=db.subsidiaries.filter(s=>user.role==="admin"||user.level==="holding"||scopedSubIds.includes(s.id));
   const annexes=db.annexes.filter(a=>user.role==="admin"||user.level==="holding"||scopedAnnexeIds.includes(a.id));
@@ -18323,28 +18648,24 @@ function Settings(){
       <tr key={p.id}>
         <td>
           <span className="dot" style={{background:p.color,marginRight:8}}></span>
-          {(locked||readOnly)
-            ? <b>{p.name}</b>
-            : <input value={p.name} onChange={e=>mutate(d=>{d.products.find(x=>x.id===p.id).name=e.target.value})} style={{fontWeight:700,border:"1px solid var(--line)",borderRadius:6,padding:"3px 7px"}}/>
-          }
+          <b>{p.name}</b>
           {locked&&<span className="tag gray" style={{marginLeft:6,fontSize:10}}>🔒 {lockReason}</span>}
         </td>
-        <td>{readOnly
-          ? <span style={{color:"var(--muted)",fontSize:13}}>{p.unit||""}</span>
-          : <input value={p.unit||""} onChange={e=>mutate(d=>{d.products.find(x=>x.id===p.id).unit=e.target.value})} style={{width:80,padding:"5px 8px",border:"1px solid var(--line)",borderRadius:7}}/>
-        }</td>
-        <td className="right mono">{readOnly
-          ? <span>{p.price.toLocaleString()} F</span>
-          : <><input type="number" value={p.price} onChange={e=>mutate(d=>{d.products.find(x=>x.id===p.id).price=Number(e.target.value)||0})} style={{width:90,textAlign:"right",padding:"5px 8px",border:"1px solid var(--line)",borderRadius:7}}/> F</>
-        }</td>
-        <td><span style={{display:"inline-block",width:24,height:24,borderRadius:6,background:p.color,verticalAlign:"middle"}}/>{!readOnly&&<input type="color" value={p.color} onChange={e=>mutate(d=>{d.products.find(x=>x.id===p.id).color=e.target.value})} style={{width:40,height:28,border:"none",background:"none",verticalAlign:"middle"}}/>}</td>
+        <td><span style={{color:"var(--muted)",fontSize:13}}>{p.unit||""}</span></td>
+        <td className="right mono"><span>{(p.price||0).toLocaleString()} F</span></td>
+        <td><span style={{display:"inline-block",width:24,height:24,borderRadius:6,background:p.color,verticalAlign:"middle"}}/></td>
         <td className="right">
-          {readOnly
-            ? null
-            : locked
-              ? <span title={`Suppression impossible : ce produit a des ${lockReason}`} style={{cursor:"not-allowed",opacity:.35,fontSize:16}}>🗑</span>
-              : <button className="x" style={{fontSize:16}} onClick={()=>mutate(d=>{d.products=d.products.filter(x=>x.id!==p.id)})}>🗑</button>
-          }
+          <div style={{display:"flex",gap:4,justifyContent:"flex-end",alignItems:"center"}}>
+            {!readOnly&&(
+              <button className="btn sm ghost" style={{padding:"3px 8px",fontSize:13}} onClick={()=>setEditProd(p)} title={locked?"Modifier (couleur / unité uniquement)":"Modifier ce produit"}>✏️</button>
+            )}
+            {readOnly
+              ? null
+              : locked
+                ? <span title={`Suppression impossible : ce produit a des ${lockReason}`} style={{cursor:"not-allowed",opacity:.35,fontSize:16}}>🗑</span>
+                : <button className="x" style={{fontSize:16}} onClick={()=>mutate(d=>{d.products=d.products.filter(x=>x.id!==p.id)})}>🗑</button>
+            }
+          </div>
         </td>
       </tr>
     );
@@ -18460,7 +18781,67 @@ function Settings(){
         </div>
       )}
       {addProd && <ProductModal target={addProd} onClose={()=>setAddProd(null)}/>}
+      {editProd && <EditProductModal prod={editProd} onClose={()=>setEditProd(null)} prodIsLocked={prodIsLocked} lockReason={(p)=>{const hs=prodHasSales(p.id),hk=prodHasStock(p.id);return hs&&hk?"ventes et stock":hs?"ventes":hk?"stock":""}}/>}
     </div>
+  );
+}
+function EditProductModal({prod,onClose,prodIsLocked,lockReason}){
+  const {mutate}=useApp();
+  const locked=prodIsLocked(prod.id);
+  const reason=lockReason(prod);
+  const [f,setF]=useState({name:prod.name,price:prod.price||0,unit:prod.unit||"",color:prod.color||"#0E7C66"});
+  const save=()=>{
+    if(!f.name.trim()) return;
+    mutate(d=>{
+      const idx=d.products.findIndex(x=>x.id===prod.id);
+      if(idx<0) return;
+      // Garde-fou : si produit verrouillé, on n'autorise PAS la modification du nom ni du prix
+      if(locked){
+        d.products[idx].unit=f.unit;
+        d.products[idx].color=f.color;
+      } else {
+        d.products[idx].name=f.name.trim();
+        d.products[idx].price=Number(f.price)||0;
+        d.products[idx].unit=f.unit;
+        d.products[idx].color=f.color;
+      }
+    });
+    onClose();
+  };
+  return (
+    <Modal title={`Modifier — ${prod.name}`} onClose={onClose}
+      foot={<><button className="btn ghost" onClick={onClose}>Annuler</button><button className="btn" onClick={save}>Enregistrer</button></>}>
+      {locked&&(
+        <div style={{background:"#fffbeb",border:"1px solid #fcd34d",borderRadius:8,padding:"10px 14px",marginBottom:12,fontSize:13}}>
+          <b>⚠️ Produit verrouillé ({reason})</b><br/>
+          <span style={{color:"#92400e"}}>Le nom et le prix ne peuvent plus être modifiés car ce produit a déjà des données enregistrées. Seuls l'unité et la couleur sont modifiables.</span>
+        </div>
+      )}
+      <Field label="Nom du produit">
+        <input value={f.name} disabled={locked} onChange={e=>setF({...f,name:e.target.value})}
+          style={{opacity:locked?0.5:1,cursor:locked?"not-allowed":"text"}}/>
+      </Field>
+      <div className="row">
+        <div style={{flex:1}}>
+          <Field label="Prix (FCFA)">
+            <input type="number" value={f.price} disabled={locked} onChange={e=>setF({...f,price:e.target.value})}
+              style={{opacity:locked?0.5:1,cursor:locked?"not-allowed":"text"}}/>
+          </Field>
+        </div>
+        <div style={{flex:1}}>
+          <Field label="Unité" hint="Ex : ticket, unité, carton">
+            <input value={f.unit} onChange={e=>setF({...f,unit:e.target.value})}/>
+          </Field>
+        </div>
+      </div>
+      <Field label="Couleur">
+        <div style={{display:"flex",alignItems:"center",gap:10}}>
+          <input type="color" value={f.color} onChange={e=>setF({...f,color:e.target.value})} style={{width:60,height:36}}/>
+          <span style={{display:"inline-block",width:32,height:32,borderRadius:8,background:f.color,border:"2px solid var(--line)"}}/>
+          <span style={{color:"var(--muted)",fontSize:13}}>{f.color}</span>
+        </div>
+      </Field>
+    </Modal>
   );
 }
 function ProductModal({target,onClose}){
