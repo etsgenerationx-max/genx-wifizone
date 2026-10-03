@@ -3005,7 +3005,7 @@ function HelpCenter({open,onClose}){
   ];
   const renderBlock=(b,i)=>{
     if(b.p) return <p key={i} style={{margin:"0 0 8px",fontSize:13.5,lineHeight:1.5}}>{b.p}</p>;
-    if(b.note) return <div key={i} style={{background:"#e9f6f1",borderLeft:"3px solid var(--brand)",borderRadius:"0 6px 6px 0",padding:"7px 10px",margin:"0 0 8px",fontSize:12.5,lineHeight:1.45}}>{b.note}</div>;
+    if(b.note) return <div key={i} style={{background:"#EEF2FF",borderLeft:"3px solid var(--brand)",borderRadius:"0 6px 6px 0",padding:"7px 10px",margin:"0 0 8px",fontSize:12.5,lineHeight:1.45}}>{b.note}</div>;
     if(b.list) return <ul key={i} style={{margin:"0 0 8px",paddingLeft:18,fontSize:13.5,lineHeight:1.6}}>{b.list.map((x,j)=><li key={j}>{x}</li>)}</ul>;
     if(b.steps) return <ol key={i} style={{margin:"0 0 8px",paddingLeft:18,fontSize:13.5,lineHeight:1.6}}>{b.steps.map((x,j)=><li key={j}>{x}</li>)}</ol>;
     return null;
@@ -3018,7 +3018,7 @@ function HelpCenter({open,onClose}){
             <div style={{color:"#fff",fontWeight:800,fontSize:16}}>Centre d'aide</div>
             <button className="x" onClick={onClose} style={{color:"#fff"}}>×</button>
           </div>
-          <div style={{color:"#cbd5d0",fontSize:12,marginBottom:10}}>Posez votre question comme à un collègue.</div>
+          <div style={{color:"#C7D2FE",fontSize:12,marginBottom:10}}>Posez votre question comme à un collègue.</div>
           <input ref={inputRef} value={q} onChange={e=>{setQ(e.target.value);setOpenId(null);}}
             placeholder="Ex : comment approvisionner un vendeur ?"
             style={{width:"100%",border:"none",outline:"none",fontSize:15,padding:"11px 13px",borderRadius:9}}/>
@@ -3031,7 +3031,7 @@ function HelpCenter({open,onClose}){
               <div style={{display:"flex",flexWrap:"wrap",gap:7,marginBottom:10,padding:"0 4px"}}>
                 {SUGGESTIONS.map((sug,i)=>(
                   <button key={i} onClick={()=>{setQ(sug);setOpenId(null);}}
-                    style={{border:"1px solid var(--line)",background:"#f7f9f8",borderRadius:20,padding:"7px 13px",fontSize:12.5,cursor:"pointer",color:"var(--ink)"}}>{sug}</button>
+                    style={{border:"1px solid var(--line)",background:"#F5F3FF",borderRadius:20,padding:"7px 13px",fontSize:12.5,cursor:"pointer",color:"var(--ink)"}}>{sug}</button>
                 ))}
               </div>
               <div className="muted" style={{fontSize:11.5,textTransform:"uppercase",letterSpacing:".04em",margin:"10px 6px 8px",fontWeight:700}}>Toutes les rubriques</div>
@@ -3047,7 +3047,7 @@ function HelpCenter({open,onClose}){
               <div style={{display:"flex",flexWrap:"wrap",gap:7}}>
                 {SUGGESTIONS.slice(0,5).map((sug,i)=>(
                   <button key={i} onClick={()=>{setQ(sug);setOpenId(null);}}
-                    style={{border:"1px solid var(--line)",background:"#f7f9f8",borderRadius:20,padding:"7px 13px",fontSize:12.5,cursor:"pointer",color:"var(--ink)"}}>{sug}</button>
+                    style={{border:"1px solid var(--line)",background:"#F5F3FF",borderRadius:20,padding:"7px 13px",fontSize:12.5,cursor:"pointer",color:"var(--ink)"}}>{sug}</button>
                 ))}
               </div>
             </div>
@@ -3057,7 +3057,7 @@ function HelpCenter({open,onClose}){
             return (
               <div key={sec.id} style={{border:"1px solid var(--line)",borderRadius:9,marginBottom:7,overflow:"hidden"}}>
                 <div onClick={()=>setOpenId(openId===sec.id?"__none__":sec.id)}
-                  style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"11px 13px",cursor:"pointer",background:isOpen?"#e9f6f1":"#fff"}}>
+                  style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"11px 13px",cursor:"pointer",background:isOpen?"#EEF2FF":"#fff"}}>
                   <span style={{fontWeight:700,fontSize:14}}>{sec.t}</span>
                   <span className="muted" style={{fontSize:12}}>{isOpen?"▲":"▼"}</span>
                 </div>
