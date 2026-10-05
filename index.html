@@ -1890,6 +1890,39 @@ function cashKeyOf(level,id){ return level==="holding"?"holding":`${level}:${id}
    Ex : GER (sub_8kcyav5) est devenu GERW (anx_yvbrtg3) ; ses dépenses level="subsidiary" doivent
    apparaître quand on navigue dans GERW. */
 const LEGACY_SUB_TO_ANNEXE={"sub-wifi":"anx_fa7jl8q","sub_8kcyav5":"anx_yvbrtg3","sub_526a1wj":"anx_fa7jl8q"};
+// Construit le Set des clés caisse visibles pour le périmètre nav + userScope.
+// Applique userScope.sucIds pour restreindre les succursales accessibles quand l'utilisateur
+// n'a accès qu'à certaines succursales d'une même annexe (ex : JULO → GW sans SUC-KARA).
+function buildVisibleKeys(db, nav, scopedAnnexeIds, scopedSubIds, userScope){
+  const visibleKeys=new Set();
+  const _anx=scopedAnnexeIds||[];
+  const _subs=scopedSubIds||[];
+  // Filtre succursale : appliqué uniquement si userScope.sucIds est non vide
+  const sucAllowed=(sucId)=> !userScope?.sucIds?.length || userScope.sucIds.includes(sucId);
+  if(nav.level==="holding"){
+    visibleKeys.add("holding");
+    db.subsidiaries.filter(s=>_subs.length===0||_subs.includes(s.id)).forEach(s=>visibleKeys.add(cashKeyOf("subsidiary",s.id)));
+    db.annexes.filter(a=>_anx.length===0||_anx.includes(a.id)).forEach(a=>{
+      visibleKeys.add(cashKeyOf("annexe",a.id));
+      (db.succursales||[]).filter(s=>s.annexeId===a.id&&sucAllowed(s.id)).forEach(s=>visibleKeys.add(cashKeyOf("annexe",s.id)));
+    });
+  } else if(nav.level==="subsidiary"){
+    visibleKeys.add(cashKeyOf("subsidiary",nav.id));
+    db.annexes.filter(a=>a.subsidiaryId===nav.id&&(_anx.length===0||_anx.includes(a.id))).forEach(a=>{
+      visibleKeys.add(cashKeyOf("annexe",a.id));
+      (db.succursales||[]).filter(s=>s.annexeId===a.id&&sucAllowed(s.id)).forEach(s=>visibleKeys.add(cashKeyOf("annexe",s.id)));
+    });
+  } else if(nav.level==="annexe"){
+    visibleKeys.add(cashKeyOf("annexe",nav.id));
+    (db.succursales||[]).filter(s=>s.annexeId===nav.id&&sucAllowed(s.id)).forEach(s=>visibleKeys.add(cashKeyOf("annexe",s.id)));
+  } else if(nav.level==="succursale"){
+    visibleKeys.add(cashKeyOf("succursale",nav.id));
+    visibleKeys.add(cashKeyOf("annexe",nav.id));
+  }
+  enrichVisibleKeysWithMigratedSubs(db,visibleKeys);
+  return visibleKeys;
+}
+
 function enrichVisibleKeysWithMigratedSubs(db, visibleKeys){
   // Pour chaque ancien subsidiary dont la filiale-annexe cible est visible, ajouter sa clé subsidiary
   Object.entries(LEGACY_SUB_TO_ANNEXE).forEach(([subId,annexeId])=>{
@@ -2281,27 +2314,53 @@ function useScopedEmployees(){
   const {db,nav,userScope,scopedAnnexeIds,scopedSubIds}=useApp();
   const navAnnexes = scopedAnnexeIds || [];
   const navSubs    = scopedSubIds    || [];
-  const navSucIds  = nav.level==="succursale"
+  const allNavSucIds = nav.level==="succursale"
     ? [nav.id]
     : (db.succursales||[]).filter(s=>navAnnexes.includes(s.annexeId)).map(s=>s.id);
+  // Intersect with userScope.sucIds if the user has succursale-level restrictions
+  const navSucIds = (userScope?.sucIds?.length>0)
+    ? allNavSucIds.filter(id=>userScope.sucIds.includes(id))
+    : allNavSucIds;
+  const _sucAllowed=(sucId)=> !userScope?.sucIds?.length || userScope.sucIds.includes(sucId);
   const resolveToAnnexe=(id)=>{
     const suc=(db.succursales||[]).find(s=>s.id===id);
     return suc?suc.annexeId:id;
   };
   const getIds=(e)=>(e.level==="custom"&&Array.isArray(e.annexeIds))?e.annexeIds:[e.assignmentId].filter(Boolean);
+  // Resolve the effective succursale id for a vendeur (succursaleId field, or assignmentId if it's a suc)
+  const empSucId=(e)=>e.succursaleId||((db.succursales||[]).find(s=>s.id===e.assignmentId)?.id)||null;
   const inView=(e)=>{
     if(nav.level==="holding"){
       if(e.level==="holding") return true;
       if(e.level==="subsidiary") return navSubs.includes(e.assignmentId);
-      // Vendeur avec succursale → vérifier via succursale dans le périmètre nav
-      if(e.role==="vendeur"&&e.succursaleId) return navSucIds.includes(e.succursaleId);
-      if(e.role==="vendeur"&&e.assignmentId&&(db.succursales||[]).find(s=>s.id===e.assignmentId)) return navSucIds.includes(e.assignmentId);
-      return getIds(e).some(id=>navAnnexes.includes(resolveToAnnexe(id))||navAnnexes.includes(id));
+      const sid=empSucId(e);
+      if(sid) return navSucIds.includes(sid); // navSucIds already filtered by userScope.sucIds
+      if(e.level==="custom"){
+        return getIds(e).some(id=>{
+          const suc=(db.succursales||[]).find(s=>s.id===id);
+          if(suc) return navSucIds.includes(suc.id);
+          return navAnnexes.includes(id)&&_sucAllowed(id);
+        });
+      }
+      return navAnnexes.includes(e.assignmentId)||navAnnexes.includes(resolveToAnnexe(e.assignmentId));
     }
     if(nav.level==="subsidiary"){
       if(e.level==="subsidiary") return e.assignmentId===nav.id;
-      if(e.role==="vendeur"&&e.succursaleId) return navSucIds.includes(e.succursaleId);
-      if(e.role==="vendeur"&&e.assignmentId&&(db.succursales||[]).find(s=>s.id===e.assignmentId)) return navSucIds.includes(e.assignmentId);
+      const sid=empSucId(e);
+      if(sid){
+        const suc=(db.succursales||[]).find(s=>s.id===sid);
+        const inSub=(db.annexes||[]).find(a=>a.id===suc?.annexeId)?.subsidiaryId===nav.id;
+        return inSub && navSucIds.includes(sid);
+      }
+      if(e.level==="custom"){
+        return getIds(e).some(id=>{
+          const aid=resolveToAnnexe(id);
+          const inSub=(db.annexes||[]).find(a=>a.id===aid)?.subsidiaryId===nav.id;
+          if(!inSub) return false;
+          const suc=(db.succursales||[]).find(s=>s.id===id);
+          return suc ? navSucIds.includes(suc.id) : true;
+        });
+      }
       return getIds(e).some(id=>navAnnexes.includes(resolveToAnnexe(id))||navAnnexes.includes(id));
     }
     if(nav.level==="succursale"){
@@ -2311,14 +2370,10 @@ function useScopedEmployees(){
       return suc&&e.assignmentId===suc.annexeId&&!e.succursaleId;
     }
     // niveau annexe
-    if(e.role==="vendeur"&&e.succursaleId){
-      const suc=(db.succursales||[]).find(s=>s.id===e.succursaleId);
-      return suc&&suc.annexeId===nav.id;
-    }
-    // vendeur dont assignmentId est une succursale de cette annexe
-    if(e.role==="vendeur"&&e.assignmentId){
-      const suc=(db.succursales||[]).find(s=>s.id===e.assignmentId);
-      if(suc&&suc.annexeId===nav.id) return true;
+    const sid=empSucId(e);
+    if(sid){
+      const suc=(db.succursales||[]).find(s=>s.id===sid);
+      return suc&&suc.annexeId===nav.id&&_sucAllowed(sid);
     }
     return getIds(e).some(id=>id===nav.id||resolveToAnnexe(id)===nav.id);
   };
@@ -3720,10 +3775,13 @@ function Dashboard({go}){
   // scopedAnnexeIds & scopedSubIds changent quand l'utilisateur change de filiale/annexe
   const navAnnexes = scopedAnnexeIds || [];
   const navSubs    = scopedSubIds    || [];
-  // succursales appartenant aux annexes du périmètre nav
-  const navSucIds  = nav.level==="succursale"
+  // succursales appartenant aux annexes du périmètre nav, intersectées avec userScope.sucIds
+  const _allNavSucIdsP = nav.level==="succursale"
     ? [nav.id]
     : (db.succursales||[]).filter(s=>navAnnexes.includes(s.annexeId)).map(s=>s.id);
+  const navSucIds = (userScope?.sucIds?.length>0)
+    ? _allNavSucIdsP.filter(id=>userScope.sucIds.includes(id))
+    : _allNavSucIdsP;
 
   const inScope = (s) => {
     // Ventes : filtrer par annexeId de la vente ou par vendeur
@@ -5335,21 +5393,8 @@ function CashPeriodSummary({visibleKeys}){
    Section autonome (accessible depuis son propre menu). */
 function CashJournal(){
   const {db,nav,subById,annexeById,userScope,empById,scopedAnnexeIds,scopedSubIds}=useApp();
-  const _navAnxJ = scopedAnnexeIds||[];
-  const _navSubsJ = scopedSubIds||[];
-  // Périmètre visible réactif au nav (mêmes règles que la section Caisse)
-  const visibleKeys=new Set();
-  if(nav.level==="holding"){ visibleKeys.add("holding"); db.subsidiaries.filter(s=>_navSubsJ.length===0||_navSubsJ.includes(s.id)).forEach(s=>visibleKeys.add(cashKeyOf("subsidiary",s.id))); db.annexes.filter(a=>_navAnxJ.length===0||_navAnxJ.includes(a.id)).forEach(a=>{visibleKeys.add(cashKeyOf("annexe",a.id));(db.succursales||[]).filter(s=>s.annexeId===a.id).forEach(s=>visibleKeys.add(cashKeyOf("annexe",s.id)));});}
-  else if(nav.level==="subsidiary"){ visibleKeys.add(cashKeyOf("subsidiary",nav.id)); db.annexes.filter(a=>a.subsidiaryId===nav.id).forEach(a=>{visibleKeys.add(cashKeyOf("annexe",a.id));(db.succursales||[]).filter(s=>s.annexeId===a.id).forEach(s=>visibleKeys.add(cashKeyOf("annexe",s.id)));});}
-  else if(nav.level==="annexe"){ visibleKeys.add(cashKeyOf("annexe",nav.id)); (db.succursales||[]).filter(s=>s.annexeId===nav.id).forEach(s=>visibleKeys.add(cashKeyOf("annexe",s.id))); }
-  else if(nav.level==="succursale"){
-    // Les ventes clôturées ont annexeId = succursaleId (seller.succursaleId||seller.assignmentId)
-    // donc on ajoute l'id de la succursale comme clé "annexe" pour que inScope() les trouve.
-    // NE PAS ajouter l'annexe parente : sinon toutes les succursales sœurs remontent aussi.
-    visibleKeys.add(cashKeyOf("succursale",nav.id));
-    visibleKeys.add(cashKeyOf("annexe",nav.id)); // ventes avec annexeId=sucId
-  }
-  enrichVisibleKeysWithMigratedSubs(db,visibleKeys);
+  // Périmètre visible — via helper centralisé qui applique userScope.sucIds
+  const visibleKeys=buildVisibleKeys(db,nav,scopedAnnexeIds,scopedSubIds,userScope);
   const [gran,setGran]=useState("week");
   const [week,setWeek]=useState(()=>weekKey(today()));
   const [month,setMonth]=useState(()=>today().slice(0,7));
@@ -5797,17 +5842,7 @@ function Cash(){
   }
 
   // Historique des mouvements de caisse visibles dans le périmètre nav
-  const visibleKeys=new Set();
-  if(nav.level==="holding"){ visibleKeys.add("holding"); db.subsidiaries.filter(s=>_navSubsC.length===0||_navSubsC.includes(s.id)).forEach(s=>visibleKeys.add(cashKeyOf("subsidiary",s.id))); db.annexes.filter(a=>_navAnxC.length===0||_navAnxC.includes(a.id)).forEach(a=>visibleKeys.add(cashKeyOf("annexe",a.id))); }
-  else if(nav.level==="subsidiary"){ visibleKeys.add(cashKeyOf("subsidiary",nav.id)); db.annexes.filter(a=>a.subsidiaryId===nav.id).forEach(a=>{visibleKeys.add(cashKeyOf("annexe",a.id));(db.succursales||[]).filter(s=>s.annexeId===a.id).forEach(s=>visibleKeys.add(cashKeyOf("annexe",s.id)));}); }
-  else if(nav.level==="annexe"){ visibleKeys.add(cashKeyOf("annexe",nav.id)); (db.succursales||[]).filter(s=>s.annexeId===nav.id).forEach(s=>visibleKeys.add(cashKeyOf("annexe",s.id))); }
-  else if(nav.level==="succursale"){
-    // Les cashMoves/ventes ont fromId/toId/annexeId = sucId → clé "annexe:sucId"
-    // NE PAS ajouter l'annexe parente : sinon toutes les succursales sœurs remontent aussi.
-    visibleKeys.add(cashKeyOf("succursale",nav.id));
-    visibleKeys.add(cashKeyOf("annexe",nav.id));
-  }
-  enrichVisibleKeysWithMigratedSubs(db,visibleKeys);
+  const visibleKeys=buildVisibleKeys(db,nav,scopedAnnexeIds,scopedSubIds,userScope);
   const moves=(db.cashMoves||[]).filter(m=>visibleKeys.has(cashKeyOf(m.fromLevel,m.fromId))||visibleKeys.has(cashKeyOf(m.toLevel,m.toId))).sort((a,b)=>(b.date||"").localeCompare(a.date||""));
   // Dépenses dans le périmètre visible — affichées comme sorties de caisse dans les mouvements
   const expenseMoves=(db.expenses||[]).filter(e=>{
@@ -6107,7 +6142,7 @@ function weekEnd(dateStr){
   return d.toISOString().slice(0,10);
 }
 function CashReleve(){
-  const {db,nav,user,annexeById,subById,scopedAnnexeIds,scopedSubIds}=useApp();
+  const {db,nav,user,userScope,annexeById,subById,scopedAnnexeIds,scopedSubIds}=useApp();
 
   // Filtres
   const [gran,setGran]=useState("month");
@@ -6183,8 +6218,9 @@ function CashReleve(){
   const rows=[];
   const L=nav.level; const LID=nav.id;
 
-  // IDs des succursales du périmètre (anciens IDs d'annexes)
-  const mySucIds=(db.succursales||[]).filter(s=>scopedAnnexeIds.includes(s.annexeId)).map(s=>s.id);
+  // IDs des succursales du périmètre (anciens IDs d'annexes), filtrés par userScope.sucIds
+  const _allMySucIds=(db.succursales||[]).filter(s=>scopedAnnexeIds.includes(s.annexeId)).map(s=>s.id);
+  const mySucIds=(userScope?.sucIds?.length>0)?_allMySucIds.filter(id=>userScope.sucIds.includes(id)):_allMySucIds;
   const LEGACY_TO_ANNEXE={"sub-wifi":"anx_fa7jl8q","sub_8kcyav5":"anx_yvbrtg3","sub_526a1wj":"anx_fa7jl8q"};
 
   const isMe=(level,id)=>{
@@ -7984,7 +8020,14 @@ function Expenses(){
   const expInScope=(e)=>{
     const aid=e.annexeId;
     const sid=e.subsidiaryId;
-    if(nav.level==="holding") return true;
+    if(nav.level==="holding"){
+      // Dépense sans annexeId (niveau subsidiary ou holding) : toujours visible
+      if(!aid&&!sid) return e.level==="holding";
+      if(!aid&&sid) return (scopedSubIds||[]).includes(sid)||LEGACY_SUB.has(sid);
+      // Dépense d'une annexe : vérifier que l'annexe ET la succursale éventuelle sont dans le scope
+      if(aid) return scopedAnnexeIds.includes(aid)||sucIds.includes(aid);
+      return true;
+    }
     if(nav.level==="subsidiary"){
       if(!aid&&sid) return (scopedSubIds||[]).includes(sid)||LEGACY_SUB.has(sid);
       return scopedAnnexeIds.includes(aid)||sucIds.includes(aid);
@@ -8264,29 +8307,44 @@ function Employees(){
     const suc=(db.succursales||[]).find(s=>s.id===id);
     return suc ? suc.annexeId : id;
   };
+  // sucIds autorisés pour cet utilisateur (vide = toutes les succursales du scope)
+  const _empSucAllowed=(sucId)=> !userScope?.sucIds?.length || userScope.sucIds.includes(sucId);
   const inView=(e)=>{
     if(nav.level==="holding"){
       if(e.level==="holding") return true;
       if(e.level==="subsidiary") return userScope.subs.includes(e.assignmentId);
+      // Résoudre le sucId réel de l'employé
+      const empSucId = e.succursaleId || ((db.succursales||[]).find(s=>s.id===e.assignmentId)?.id)||null;
       if(e.level==="custom"){
         return annexesOfEmp(e).some(id=>{
+          const suc=(db.succursales||[]).find(s=>s.id===id);
+          if(suc) return userScope.sucIds?.length>0 ? userScope.sucIds.includes(suc.id) : userScope.annexes.includes(suc.annexeId);
           const aid=resolveToAnnexe(id);
           return userScope.annexes.includes(aid)||userScope.annexes.includes(id);
         });
       }
+      // Employé avec succursale : vérifier sucIds d'abord
+      if(empSucId) return _empSucAllowed(empSucId);
       return userScope.annexes.includes(e.assignmentId)||userScope.annexes.includes(resolveToAnnexe(e.assignmentId));
     }
     if(nav.level==="subsidiary"){
       if(e.level==="subsidiary") return e.assignmentId===nav.id;
+      const empSucId2 = e.succursaleId || ((db.succursales||[]).find(s=>s.id===e.assignmentId)?.id)||null;
       if(e.level==="custom"){
         return annexesOfEmp(e).some(id=>{
           const aid=resolveToAnnexe(id);
-          return db.annexes.find(a=>a.id===aid)?.subsidiaryId===nav.id;
+          const inSub=db.annexes.find(a=>a.id===aid)?.subsidiaryId===nav.id;
+          if(!inSub) return false;
+          const suc=(db.succursales||[]).find(s=>s.id===id);
+          return suc ? _empSucAllowed(suc.id) : true;
         });
       }
       if(e.level==="annexe"){
         const aid=resolveToAnnexe(e.assignmentId);
-        return db.annexes.find(a=>a.id===aid)?.subsidiaryId===nav.id;
+        const inSub=db.annexes.find(a=>a.id===aid)?.subsidiaryId===nav.id;
+        if(!inSub) return false;
+        if(empSucId2) return _empSucAllowed(empSucId2);
+        return true;
       }
       return false;
     }
@@ -9864,7 +9922,8 @@ function Missions(){
   const scopeEmpIds = useMemo(()=>{
     if(nav.level==="holding") return null; // null = tout visible
     const navAnx=scopedAnnexeIds||[];
-    const navSuc=nav.level==="succursale"?[nav.id]:(db.succursales||[]).filter(s=>navAnx.includes(s.annexeId)).map(s=>s.id);
+    const _allNavSucM=nav.level==="succursale"?[nav.id]:(db.succursales||[]).filter(s=>navAnx.includes(s.annexeId)).map(s=>s.id);
+    const navSuc=(userScope?.sucIds?.length>0)?_allNavSucM.filter(id=>userScope.sucIds.includes(id)):_allNavSucM;
     return (db.employees||[]).filter(e=>{
       if(navAnx.includes(e.assignmentId||e.annexeId)) return true;
       if(e.succursaleId && navSuc.includes(e.succursaleId)) return true;
@@ -10935,7 +10994,7 @@ function PartnerDivRow({p,dividend,paid,canPayDividend,canViewReleve,payDividend
 
 
 function Investisseurs(){
-  const {db,mutate,user,nav,scopedAnnexeIds,scopedSubIds}=useApp();
+  const {db,mutate,user,nav,userScope,scopedAnnexeIds,scopedSubIds}=useApp();
 
   const canManagePartner=hasPerm(db,user,"do:inv_manage")||hasPerm(db,user,"do:partner_manage")||user.role==="admin";
   const canPayDividend=hasPerm(db,user,"do:inv_pay")||hasPerm(db,user,"do:dividend_pay")||user.role==="admin";
@@ -11028,7 +11087,8 @@ function Investisseurs(){
   const calcMonth=divDate.slice(0,7);
   // Périmètre nav réactif
   const _navAnx = scopedAnnexeIds||[];
-  const _navSucIds = nav.level==="succursale"?[nav.id]:(db.succursales||[]).filter(s=>_navAnx.includes(s.annexeId)).map(s=>s.id);
+  const _allNavSucIdsInv = nav.level==="succursale"?[nav.id]:(db.succursales||[]).filter(s=>_navAnx.includes(s.annexeId)).map(s=>s.id);
+  const _navSucIds = (userScope?.sucIds?.length>0)?_allNavSucIdsInv.filter(id=>userScope.sucIds.includes(id)):_allNavSucIdsInv;
   const inNavRev=(r)=>{
     if(nav.level==="holding") return true;
     const aid=r.annexeId;
@@ -11734,10 +11794,11 @@ function Investisseurs(){
    BILAN FINANCIER — Vue consolidée par niveau hiérarchique
    ═══════════════════════════════════════════════════════ */
 function BilanFinancier(){
-  const {db,user,nav,scopedAnnexeIds,scopedSubIds}=useApp();
+  const {db,user,nav,userScope,scopedAnnexeIds,scopedSubIds}=useApp();
   const navAnx = scopedAnnexeIds || [];
   const navSubs = scopedSubIds || [];
-  const navSucIds = nav.level==="succursale" ? [nav.id] : (db.succursales||[]).filter(s=>navAnx.includes(s.annexeId)).map(s=>s.id);
+  const _allNavSucIdsBF = nav.level==="succursale" ? [nav.id] : (db.succursales||[]).filter(s=>navAnx.includes(s.annexeId)).map(s=>s.id);
+  const navSucIds = (userScope?.sucIds?.length>0) ? _allNavSucIdsBF.filter(id=>userScope.sucIds.includes(id)) : _allNavSucIdsBF;
   const canView=user.role==="admin"||hasPerm(db,user,"access:bilanfinancier");
   if(!canView) return <div className="page"><Empty icon="🔒" title="Accès restreint" sub="Vous n'avez pas la permission de voir cette section."/></div>;
   const [tab,setTab]=useState("vue");
@@ -16331,7 +16392,8 @@ function Users(){
   usePageActions({ onNew:()=>setAdd(true), onFilter:()=>focusSearch() });
   const navAnx = scopedAnnexeIds||[];
   const navSubs = scopedSubIds||[];
-  const navSucIds = nav.level==="succursale"?[nav.id]:(db.succursales||[]).filter(s=>navAnx.includes(s.annexeId)).map(s=>s.id);
+  const _allNavSucIdsU = nav.level==="succursale"?[nav.id]:(db.succursales||[]).filter(s=>navAnx.includes(s.annexeId)).map(s=>s.id);
+  const navSucIds = (userScope?.sucIds?.length>0)?_allNavSucIdsU.filter(id=>userScope.sucIds.includes(id)):_allNavSucIdsU;
   const visible=db.users.filter(u=>{
     // Comptes holding : uniquement visibles par un admin en nav holding
     if(u.level==="holding") return nav.level==="holding"&&user.role==="admin";
@@ -18293,7 +18355,8 @@ function Echeances(){
 
   // Filtre périmètre navigation (nav)
   const navAnx = scopedAnnexeIds||[];
-  const navSucIds = nav.level==="succursale" ? [nav.id] : (db.succursales||[]).filter(s=>navAnx.includes(s.annexeId)).map(s=>s.id);
+  const _allNavSucIdsE = nav.level==="succursale" ? [nav.id] : (db.succursales||[]).filter(s=>navAnx.includes(s.annexeId)).map(s=>s.id);
+  const navSucIds = (userScope?.sucIds?.length>0)?_allNavSucIdsE.filter(id=>userScope.sucIds.includes(id)):_allNavSucIdsE;
   const allDeadlines = (db.deadlines||[]).sort((a,b)=>(a.dueDate||"").localeCompare(b.dueDate||""));
   const deadlines = allDeadlines.filter(d=>{
     // Filtre droits utilisateur
@@ -19600,7 +19663,8 @@ function RapportMensuel() {
   // Périmètre réactif au nav choisi
   const navAnx = scopedAnnexeIds || [];
   const navSubs = scopedSubIds || [];
-  const navSucIds = nav.level==="succursale" ? [nav.id] : (db.succursales||[]).filter(s=>navAnx.includes(s.annexeId)).map(s=>s.id);
+  const _allNavSucIdsR = nav.level==="succursale" ? [nav.id] : (db.succursales||[]).filter(s=>navAnx.includes(s.annexeId)).map(s=>s.id);
+  const navSucIds = (userScope?.sucIds?.length>0)?_allNavSucIdsR.filter(id=>userScope.sucIds.includes(id)):_allNavSucIdsR;
   const inScopeS = (s) => {
     if(nav.level==="holding") return true;
     // Niveau succursale : ventes de cette succursale uniquement
@@ -19981,7 +20045,8 @@ function RHDashboard() {
 
   // ── Périmètre réactif au nav ─────────────────────────────────
   const navAnx = scopedAnnexeIds || [];
-  const navSucIds = nav.level==="succursale" ? [nav.id] : (db.succursales||[]).filter(s=>navAnx.includes(s.annexeId)).map(s=>s.id);
+  const _allNavSucIdsRH = nav.level==="succursale" ? [nav.id] : (db.succursales||[]).filter(s=>navAnx.includes(s.annexeId)).map(s=>s.id);
+  const navSucIds = (userScope?.sucIds?.length>0)?_allNavSucIdsRH.filter(id=>userScope.sucIds.includes(id)):_allNavSucIdsRH;
   const scopeEmpIds = React.useMemo(()=>{
     if(nav.level==="holding") return null;
     return (db.employees||[]).filter(e=>
@@ -20262,15 +20327,16 @@ function RHDashboard() {
 // BANDEAU D'ALERTES GLOBAL
 // ═══════════════════════════════════════════════════════════════
 function useAlertes() {
-  const {db, nav, scopedAnnexeIds, scopedSubIds} = useApp();
+  const {db, nav, userScope, scopedAnnexeIds, scopedSubIds} = useApp();
   const now = new Date();
   const alerts = [];
   // Périmètre de navigation pour filtrer les alertes
   const navAnnexes = scopedAnnexeIds || [];
   const navSubs    = scopedSubIds    || [];
-  const navSucIds  = nav.level==="succursale"
+  const _allNavSucIdsA = nav.level==="succursale"
     ? [nav.id]
     : (db.succursales||[]).filter(s=>navAnnexes.includes(s.annexeId)).map(s=>s.id);
+  const navSucIds = (userScope?.sucIds?.length>0)?_allNavSucIdsA.filter(id=>userScope.sucIds.includes(id)):_allNavSucIdsA;
   // Filtre projet par périmètre : annexeId, subsidiaryId, ou succursaleId
   const inScopeProject = (p) => {
     if(nav.level==="holding") return true;
