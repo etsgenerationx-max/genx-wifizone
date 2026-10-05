@@ -1828,10 +1828,10 @@ function RoleTag({role}){
 function useMetrics(){
   const {db,scopedAnnexeIds,nav,userScope}=useApp();
   return useMemo(()=>{
+    // Succursales visibles = celles dont l'annexe parente est dans le périmètre scoped
+    // + restriction par userScope.sucIds si l'utilisateur a un scope succursale limité
     const allSucIds=(db.succursales||[]).filter(s=>scopedAnnexeIds.includes(s.annexeId)).map(s=>s.id);
-    // Restreindre par permission sucIds UNIQUEMENT si l'utilisateur est lui-même de niveau succursale
-    // (nav holding/subsidiary/annexe → toutes les succursales du scope nav sont visibles)
-    const sucIds=(userScope?.level==="succursale" && userScope?.sucIds?.length>0)
+    const sucIds=(userScope?.sucIds?.length>0 && userScope.sucIds.length < (db.succursales||[]).length)
       ? allSucIds.filter(id=>userScope.sucIds.includes(id))
       : allSucIds;
     const allIds=new Set([...scopedAnnexeIds,...sucIds]);
@@ -2329,9 +2329,16 @@ function useScopedEmployees(){
 /* Vendeurs (niveau annexe) visibles dans le périmètre courant */
 function useScopedSellers(){
   const {db,scopedAnnexeIds,nav,userScope}=useApp();
-  // sucIds visibles dans la nav courante (intersection périmètre utilisateur + nav)
-  const navSucIds = nav.level==="succursale" ? [nav.id]
+  // sucIds visibles = intersection de :
+  //   1. la nav courante (toutes les suc de l'annexe naviguée, ou la suc elle-même)
+  //   2. userScope.sucIds (succursales explicitement autorisées pour cet utilisateur)
+  //      → si vide, l'utilisateur n'a pas de restriction par succursale (scope annexe/sub entier)
+  const allNavSucIds = nav.level==="succursale" ? [nav.id]
     : (db.succursales||[]).filter(s=>scopedAnnexeIds.includes(s.annexeId)).map(s=>s.id);
+  // Appliquer la restriction succursale de l'utilisateur si elle existe
+  const navSucIds = (userScope?.sucIds?.length>0)
+    ? allNavSucIds.filter(id=>userScope.sucIds.includes(id))
+    : allNavSucIds;
 
   return db.employees.filter(e=>{
     if(e.role!=="vendeur"||e.active!==true) return false;
@@ -2503,9 +2510,9 @@ function defaultRoles(){
   return [
     {id:"admin",name:"Direction",locked:true,perms:everything},
     // Responsable GROUPE : gère un groupe entier (level="subsidiary") — accès étendu multi-filiales
-    {id:"responsable",name:"Responsable GROUPE",perms:["access:dashboard","access:cash","access:bank","access:bilan","access:sales","access:inventory","access:expenses","access:employees","access:attendance","access:payroll","access:gestion_salariale","access:rh_dashboard","access:rapport_mensuel","access:projects","access:annexes","access:users","access:settings","access:objectives","access:forecast","access:performance","do:edit_stock","do:transfer_stock","do:declare_defective","do:edit_closed_sale","do:edit_expense","do:pay_salaries","do:cancel_salaries","do:cash_up","do:cash_down","do:bank_deposit","do:bank_withdraw","do:bank_transfer","do:approve_overtime","do:manage_users","do:delete_data"]},
+    {id:"responsable",name:"Responsable GROUPE",perms:["access:dashboard","access:cash","access:vendor_cash","access:bank","access:bilan","access:sales","access:inventory","access:expenses","access:employees","access:attendance","access:payroll","access:gestion_salariale","access:rh_dashboard","access:rapport_mensuel","access:projects","access:annexes","access:users","access:settings","access:objectives","access:forecast","access:performance","do:edit_stock","do:transfer_stock","do:declare_defective","do:edit_closed_sale","do:edit_expense","do:pay_salaries","do:cancel_salaries","do:cash_up","do:cash_down","do:bank_deposit","do:bank_withdraw","do:bank_transfer","do:cash_transfer","do:vendor_cash_delete","do:approve_overtime","do:manage_users","do:delete_data"]},
     // Responsable FILIALE : gère une seule filiale (level="annexe") — accès limité à sa filiale
-    {id:"resp_annexe",name:"Responsable FILIALE",perms:["access:dashboard","access:cash","access:bank","access:sales","access:inventory","access:expenses","access:employees","access:attendance","access:settings","access:objectives","access:forecast","access:performance","do:edit_stock","do:transfer_stock","do:declare_defective","do:edit_closed_sale","do:edit_expense","do:pay_salaries","do:cancel_salaries","do:cash_up","do:bank_deposit","do:bank_withdraw","do:bank_transfer"]},
+    {id:"resp_annexe",name:"Responsable FILIALE",perms:["access:dashboard","access:cash","access:vendor_cash","access:bank","access:sales","access:inventory","access:expenses","access:employees","access:attendance","access:settings","access:objectives","access:forecast","access:performance","do:edit_stock","do:transfer_stock","do:declare_defective","do:edit_closed_sale","do:edit_expense","do:pay_salaries","do:cancel_salaries","do:cash_up","do:bank_deposit","do:bank_withdraw","do:bank_transfer","do:cash_transfer"]},
     {id:"inventaire",name:"Agent inventaire",perms:["access:sales","access:inventory"]},
     {id:"technicien",name:"Technicien",perms:["access:dashboard","access:attendance"]},
   ];
@@ -4102,6 +4109,23 @@ function liveSaleValues(db, sale, liveWeeks){
   return { supplied:supNow, remaining:rem, sold, revenue:sold*price, changed:true };
 }
 
+// Retourne le code filiale (annexe) d'un vendeur, en tenant compte du cas succursale
+// où assignmentId pointe vers une succursale et non directement vers une annexe.
+function sellerAnnexeCode(db, sel){
+  if(!sel) return "";
+  // Cas direct : assignmentId est une annexe
+  const direct = (db.annexes||[]).find(a=>a.id===sel.assignmentId);
+  if(direct) return direct.code;
+  // Cas succursale : succursaleId ou assignmentId pointe vers une succursale
+  const sucId = sel.succursaleId || sel.assignmentId;
+  const suc = (db.succursales||[]).find(s=>s.id===sucId);
+  if(suc){
+    const ann = (db.annexes||[]).find(a=>a.id===suc.annexeId);
+    if(ann) return ann.code;
+  }
+  return "";
+}
+
 function Sales(){
   const {db,mutate,commissionRateOf,nav,subById,annexeById,user}=useApp();
   const canEditClosedSale = hasPerm(db,user,"do:edit_closed_sale");
@@ -4174,7 +4198,7 @@ function Sales(){
       </div>
       <table>
         <thead><tr><th>Vendeur</th><th>Filiale</th><th class="right">Approv.</th><th class="right">Restant</th><th class="right">Vendus</th><th class="right">Recette</th><th class="right">Commission</th></tr></thead>
-        <tbody>${rows.map(r=>`<tr><td><b>${esc(r.sel.name)}</b></td><td>${esc(db.annexes.find(a=>a.id===r.sel.assignmentId)?.code||"")}</td><td class="right mono">${esc(fmt(r.supplied))}</td><td class="right mono">${esc(fmt(r.remaining))}</td><td class="right mono"><b>${esc(fmt(r.sold))}</b></td><td class="right mono">${esc(fcfa(r.revenue))}</td><td class="right mono">${esc(fcfa(r.commission))} <span class="small muted">(${(r.rate*100).toFixed(r.rate*100%1?1:0)}%)</span></td></tr>`).join("")}</tbody>
+        <tbody>${rows.map(r=>`<tr><td><b>${esc(r.sel.name)}</b></td><td>${esc(sellerAnnexeCode(db,r.sel))}</td><td class="right mono">${esc(fmt(r.supplied))}</td><td class="right mono">${esc(fmt(r.remaining))}</td><td class="right mono"><b>${esc(fmt(r.sold))}</b></td><td class="right mono">${esc(fcfa(r.revenue))}</td><td class="right mono">${esc(fcfa(r.commission))} <span class="small muted">(${(r.rate*100).toFixed(r.rate*100%1?1:0)}%)</span></td></tr>`).join("")}</tbody>
         <tfoot><tr><td colspan="4">TOTAL</td><td class="right mono">${esc(fmt(totals.sold))}</td><td class="right mono">${esc(fcfa(totals.revenue))}</td><td class="right mono">${esc(fcfa(totals.commission))}</td></tr></tfoot>
       </table>`;
     printDocument({title:"État des ventes",subtitle:periodLabel,scope:scopeLabel,period:periodLabel,body,signatures:["Le responsable","Le contrôleur"]});
@@ -4210,10 +4234,10 @@ function Sales(){
         <div className="card-pad" style={{paddingTop:0}}>
         <SearchBar
           items={rows}
-          searchText={r=>`${r.sel.name} ${db.annexes.find(a=>a.id===r.sel.assignmentId)?.code||""}`}
+          searchText={r=>`${r.sel.name} ${sellerAnnexeCode(db,r.sel)}`}
           placeholder="🔍 Rechercher un vendeur…"
           filters={[
-            {key:"annexe",label:"Filiale",options:db.annexes.map(a=>({v:a.id,l:a.code})),match:(r,v)=>r.sel.assignmentId===v},
+            {key:"annexe",label:"Filiale",options:db.annexes.filter(a=>sellers.some(s=>{const suc=(db.succursales||[]).find(x=>x.id===s.succursaleId);return s.assignmentId===a.id||(suc&&suc.annexeId===a.id);})).map(a=>({v:a.id,l:a.code})),match:(r,v)=>{const suc=(db.succursales||[]).find(s=>s.id===r.sel.succursaleId);return r.sel.assignmentId===v||(suc&&suc.annexeId===v);}},
             {key:"activite",label:"Activité",options:[{v:"vendu",l:"A vendu"},{v:"zero",l:"Rien vendu"}],match:(r,v)=>v==="vendu"?r.sold>0:r.sold===0},
           ]}>
         {(frows)=>{
@@ -4236,7 +4260,7 @@ function Sales(){
             {frows.map(r=>(
               <tr key={r.sel.id}>
                 <td><b>{r.sel.name}</b>{r.changed&&<span className="tag gold" style={{marginLeft:6,fontSize:9}} title="L'approvisionnement a changé dans l'inventaire depuis la clôture : les chiffres ont été recalculés automatiquement. Rouvrez la clôture pour figer ces nouvelles valeurs.">↻ recalculé</span>}</td>
-                <td><span className="chip">{db.annexes.find(a=>a.id===r.sel.assignmentId)?.code.replace(/^[A-Z]+-/,"")}</span></td>
+                <td><span className="chip">{sellerAnnexeCode(db,r.sel).replace(/^[A-Z]+-/,"")}</span></td>
                 <td className="right mono">{fmt(r.supplied)}</td>
                 <td className="right mono">{fmt(r.remaining)}</td>
                 <td className="right mono"><b>{fmt(r.sold)}</b></td>
@@ -4474,10 +4498,10 @@ function Inventory(){
       {sellers.length? (
       <SearchBar
         items={sellers}
-        searchText={sel=>`${sel.name} ${db.annexes.find(a=>a.id===sel.assignmentId)?.code||""}`}
+        searchText={sel=>`${sel.name} ${sellerAnnexeCode(db,sel)}`}
         placeholder="🔍 Rechercher un vendeur…"
         filters={[
-          {key:"annexe",label:"Filiale",options:db.annexes.map(a=>({v:a.id,l:a.code})),match:(sel,v)=>sel.assignmentId===v},
+          {key:"annexe",label:"Filiale",options:db.annexes.filter(a=>sellers.some(s=>{const suc=(db.succursales||[]).find(x=>x.id===s.succursaleId);return s.assignmentId===a.id||(suc&&suc.annexeId===a.id);})).map(a=>({v:a.id,l:a.code})),match:(sel,v)=>{const suc=(db.succursales||[]).find(s=>s.id===sel.succursaleId);return sel.assignmentId===v||(suc&&suc.annexeId===v);}},
         ]}>
       {(fsellers)=> fsellers.length? fsellers.map(sel=>{
         const subId=subOfAnnexe(sel.succursaleId||sel.assignmentId);
@@ -4493,7 +4517,7 @@ function Inventory(){
           const sold=sale?sale.sold:0; const remaining=sale?sale.remaining:total;
           return {p,init,refill,transferred,defective,total,sold,remaining};
         });
-        const annexeCode=db.annexes.find(a=>a.id===sel.assignmentId)?.code||"";
+        const annexeCode=sellerAnnexeCode(db,sel);
         const printStock=()=>{
           const body=`
             <table style="margin-bottom:8px;">
@@ -5816,22 +5840,33 @@ function Cash(){
   // Vendeurs dans le périmètre actif (pour les caisses vendeurs)
   const scopedVendors=(db.employees||[]).filter(e=>{
     if(e.role!=="vendeur"||e.active===false) return false;
-    if(nav.level==="holding") return !userScope?.sucIds?.length||userScope.sucIds.includes(e.succursaleId)||!e.succursaleId;
-    if(nav.level==="subsidiary"){
-      const inSub=(db.annexes||[]).find(a=>a.id===e.assignmentId)?.subsidiaryId===nav.id;
-      if(!inSub) return false;
-      if(userScope?.sucIds?.length>0&&e.succursaleId) return userScope.sucIds.includes(e.succursaleId);
-      return true;
+    // Résoudre le vrai ID de succursale (succursaleId OU assignmentId pointant une suc)
+    const sucId=e.succursaleId||((db.succursales||[]).find(s=>s.id===e.assignmentId)?.id)||null;
+    if(nav.level==="holding"){
+      if(sucId) return !userScope?.sucIds?.length||userScope.sucIds.includes(sucId);
+      // Vendeur sans succursale : visible uniquement si l'utilisateur n'a pas de restriction sur sucIds
+      return !userScope?.sucIds?.length;
     }
-    if(nav.level==="annexe"){
-      if(e.assignmentId===nav.id){
-        if(userScope?.sucIds?.length>0&&e.succursaleId) return userScope.sucIds.includes(e.succursaleId);
+    if(nav.level==="subsidiary"){
+      if(sucId){
+        const suc=(db.succursales||[]).find(s=>s.id===sucId);
+        const inSub=(db.annexes||[]).find(a=>a.id===suc?.annexeId)?.subsidiaryId===nav.id;
+        if(!inSub) return false;
+        if(userScope?.sucIds?.length>0) return userScope.sucIds.includes(sucId);
         return true;
       }
-      const suc=(db.succursales||[]).find(s=>s.id===e.succursaleId);
-      return suc?.annexeId===nav.id&&(!userScope?.sucIds?.length||userScope.sucIds.includes(e.succursaleId));
+      const inSub=(db.annexes||[]).find(a=>a.id===e.assignmentId)?.subsidiaryId===nav.id;
+      if(!inSub) return false;
+      return !userScope?.sucIds?.length; // vendeur sans suc : visible si pas de restriction sucIds
     }
-    if(nav.level==="succursale") return e.succursaleId===nav.id;
+    if(nav.level==="annexe"){
+      if(sucId){
+        const suc=(db.succursales||[]).find(s=>s.id===sucId);
+        return suc?.annexeId===nav.id&&(!userScope?.sucIds?.length||userScope.sucIds.includes(sucId));
+      }
+      return e.assignmentId===nav.id;
+    }
+    if(nav.level==="succursale") return sucId===nav.id;
     return false;
   });
   // Soldes de caisse de chaque vendeur
@@ -6470,21 +6505,40 @@ function CashReleve(){
 }
 
 function VendorCashPage(){
-  const {db,user,nav,scopedAnnexeIds,annexeById}=useApp();
+  const {db,user,nav,userScope,scopedAnnexeIds,annexeById}=useApp();
   const canTransfer=hasPerm(db,user,"do:cash_transfer")||user.role==="admin";
 
-  // Vendeurs du périmètre
+  // Vendeurs du périmètre — même logique que scopedVendors dans Cash
+  // pour garantir que userScope.sucIds est bien respecté
   const vendors=(db.employees||[]).filter(e=>{
     if(e.role!=="vendeur"||e.active===false) return false;
-    if(nav.level==="holding") return true;
-    if(nav.level==="subsidiary") return scopedAnnexeIds.includes(e.assignmentId);
-    if(nav.level==="annexe"){
-      // Vendeurs directement dans la filiale OU dans une succursale de la filiale
-      if(e.assignmentId===nav.id) return true;
-      const suc=(db.succursales||[]).find(s=>s.id===e.succursaleId);
-      return suc?.annexeId===nav.id;
+    // Résoudre l'ID de succursale du vendeur (succursaleId OU assignmentId pointant une succursale)
+    const sucId=e.succursaleId||((db.succursales||[]).find(s=>s.id===e.assignmentId)?.id)||null;
+    if(nav.level==="holding"){
+      // Filtre par userScope.sucIds si l'utilisateur a un périmètre restreint
+      if(sucId) return !userScope?.sucIds?.length||userScope.sucIds.includes(sucId);
+      return !userScope?.sucIds?.length; // vendeur sans succursale : visible seulement si pas de restriction sur sucIds
     }
-    if(nav.level==="succursale") return e.succursaleId===nav.id;
+    if(nav.level==="subsidiary"){
+      // Vendeur en succursale : succursale doit appartenir à une annexe de ce groupe
+      if(sucId){
+        const ann=(db.succursales||[]).find(s=>s.id===sucId);
+        const inSub=scopedAnnexeIds.includes(ann?.annexeId);
+        if(!inSub) return false;
+        if(userScope?.sucIds?.length>0) return userScope.sucIds.includes(sucId);
+        return true;
+      }
+      // Vendeur directement dans une annexe de ce groupe
+      return scopedAnnexeIds.includes(e.assignmentId);
+    }
+    if(nav.level==="annexe"){
+      if(sucId){
+        const suc=(db.succursales||[]).find(s=>s.id===sucId);
+        return suc?.annexeId===nav.id&&(!userScope?.sucIds?.length||userScope.sucIds.includes(sucId));
+      }
+      return e.assignmentId===nav.id;
+    }
+    if(nav.level==="succursale") return sucId===nav.id;
     return false;
   });
 
