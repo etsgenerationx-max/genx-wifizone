@@ -1551,22 +1551,43 @@ function AppProvider({children}){
     // Niveau annexe/custom — résoudre les IDs de succursales vers leurs filiales parentes
     const rawIds=(Array.isArray(user.annexeIds)&&user.annexeIds.length)?user.annexeIds:(user.assignmentId?[user.assignmentId]:[]);
     const annexeIds=[];
+    const fullAnnexeIds=[]; // annexes avec accès complet (pas de restriction par succursale)
     const sucIds=[];
     rawIds.forEach(id=>{
       const suc=(db.succursales||[]).find(s=>s.id===id);
       if(suc){
+        // ID de succursale spécifique → accès restreint à cette succursale
         sucIds.push(id);
         if(!annexeIds.includes(suc.annexeId)) annexeIds.push(suc.annexeId);
       } else if(db.annexes.find(a=>a.id===id)){
-        annexeIds.push(id);
-        (db.succursales||[]).filter(s=>s.annexeId===id).forEach(s=>{if(!sucIds.includes(s.id))sucIds.push(s.id);});
+        // ID d'annexe entière → accès complet à cette annexe
+        if(!annexeIds.includes(id)) annexeIds.push(id);
+        if(!fullAnnexeIds.includes(id)) fullAnnexeIds.push(id);
       } else {
-        // ID legacy inconnu — garder tel quel
-        annexeIds.push(id);
+        // ID legacy inconnu — traiter comme annexe entière
+        if(!annexeIds.includes(id)) annexeIds.push(id);
+        if(!fullAnnexeIds.includes(id)) fullAnnexeIds.push(id);
       }
     });
+    // Construction de finalSucIds :
+    // - Aucune annexe entière → sucIds tels quels (restriction aux suc spécifiques)
+    // - Toutes annexes entières → vide (pas de restriction)
+    // - Mix → toutes suc des annexes entières + suc spécifiques des autres annexes
+    let finalSucIds;
+    if(fullAnnexeIds.length===0){
+      // Que des succursales spécifiques → restriction directe
+      finalSucIds = sucIds;
+    } else if(sucIds.length===0){
+      // Que des annexes entières → pas de restriction sur les succursales
+      finalSucIds = [];
+    } else {
+      // Mix : certaines annexes entières + des suc spécifiques d'autres annexes
+      // → ajouter toutes les suc des annexes entières aux suc spécifiques
+      const fullAnnexeSucs = (db.succursales||[]).filter(s=>fullAnnexeIds.includes(s.annexeId)).map(s=>s.id);
+      finalSucIds = [...new Set([...sucIds, ...fullAnnexeSucs])];
+    }
     const subs=[...new Set(annexeIds.map(aid=>db.annexes.find(a=>a.id===aid)?.subsidiaryId).filter(Boolean))];
-    return {subs, annexes:annexeIds, sucIds};
+    return {subs, annexes:annexeIds, sucIds:finalSucIds};
   },[db,user]);
 
 
@@ -5829,8 +5850,8 @@ function Cash(){
   } else if(nav.level==="annexe"){
     const a=annexeById(nav.id);
     mainTitle=`Caisse — ${a?.code||""}`; mainBalance=bal("annexe",nav.id); mainSub="Recettes des ventes − dépenses − remontées";
-    const _navSucC=(db.succursales||[]).filter(s=>_navAnxC.includes(s.annexeId)).map(s=>s.id);
-    const succs=(db.succursales||[]).filter(s=>s.annexeId===nav.id&&s.active!==false&&(_navSucC.length===0||_navSucC.includes(s.id)));
+    // Filtrer les succursales par userScope.sucIds si l'utilisateur a un périmètre restreint
+    const succs=(db.succursales||[]).filter(s=>s.annexeId===nav.id&&s.active!==false&&(!userScope?.sucIds?.length||userScope.sucIds.includes(s.id)));
     if(succs.length>0){
       children=succs.map(s=>({label:s.code||s.name,value:balSuc(s.id),level:"succursale",id:s.id}));
       consolidated=succs.reduce((t,s)=>t+balSuc(s.id),0)+bal("annexe",nav.id);
