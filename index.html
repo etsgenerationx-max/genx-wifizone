@@ -399,6 +399,21 @@ const uid = (p="id")=> p+"_"+Math.random().toString(36).slice(2,9);
 const today = ()=> new Date().toISOString().slice(0,10);
 const nowISO = ()=> new Date().toISOString();
 
+/**
+ * resolveToAnnexeId(db, id) — fonction centralisée de résolution d'ID géographique.
+ * Un champ supposé "annexeId" peut contenir indifféremment :
+ *   - un vrai annexe ID  → retourne l'ID tel quel
+ *   - un succursale ID   → retourne l'annexeId parent de cette succursale
+ *   - null/undefined     → retourne null
+ * Utiliser systématiquement avant toute comparaison avec navAnnexeIds ou db.annexes.
+ */
+function resolveToAnnexeId(db, id){
+  if(!id) return null;
+  if((db.annexes||[]).find(a=>a.id===id)) return id; // déjà une annexe ID
+  const suc=(db.succursales||[]).find(s=>s.id===id);
+  return suc?suc.annexeId:id; // succursale → annexe parente ; inconnu → passthrough
+}
+
 /* ---- ISO week helpers ---- */
 function isoWeek(d){
   const date = new Date(Date.UTC(d.getFullYear(),d.getMonth(),d.getDate()));
@@ -549,7 +564,7 @@ function buildForecast(db, targetMonth, marge, scopedAnnexeIds, scopedSucId){
   const sellers=(db.employees||[]).filter(e=>{
     if(e.role!=="vendeur"||e.active===false) return false;
     if(scopedSucId) return e.succursaleId===scopedSucId;
-    return e.level==="annexe"&&(!scopedAnnexeIds||scopedAnnexeIds.includes(e.assignmentId));
+    return e.level==="annexe"&&(!scopedAnnexeIds||scopedAnnexeIds.includes(resolveToAnnexeId(db,e.assignmentId)));
   });
   const rows=[];
   const parProduit={}; // productId -> {brut, aCreer}
@@ -604,7 +619,7 @@ function buildPerformance(db, scope, period, scopedAnnexeIds){
   Object.keys(agg).forEach(sid=>{
     const e=(db.employees||[]).find(x=>x.id===sid);
     if(!e) return;
-    if(scopedAnnexeIds && !scopedAnnexeIds.includes(e.assignmentId)) return;
+    if(scopedAnnexeIds && !scopedAnnexeIds.includes(resolveToAnnexeId(db,e.assignmentId))) return;
     const p=agg[sid];
     p.ecoulement = p.supplied>0 ? (p.sold/p.supplied*100) : 0;
     rows.push({sellerId:sid, name:e.name, annexeId:e.assignmentId, ...p});
@@ -2113,9 +2128,13 @@ function computeBalances(db){
   // 2) Dépenses → sortent de la caisse de leur niveau
   (db.expenses||[]).forEach(e=>{
     if(e.level==="holding") addC("holding",null,-(e.amount||0));
-    else if(e.annexeId) addC("annexe",e.annexeId,-(e.amount||0));
-    // Fallback : dépense sauvegardée avec level="succursale" (ancien schéma) → clé annexe avec sucId
-    else if(e.level==="succursale"&&e.succursaleId) addC("annexe",e.succursaleId,-(e.amount||0));
+    else if(e.annexeId){
+      // Résoudre : annexeId peut être un suc-ID legacy → remonter à l'annexe parente
+      const resolvedAnnexeId=resolveToAnnexeId(db,e.annexeId);
+      addC("annexe",resolvedAnnexeId,-(e.amount||0));
+    }
+    // Fallback : dépense sauvegardée avec level="succursale" (ancien schéma)
+    else if(e.level==="succursale"&&e.succursaleId) addC("annexe",resolveToAnnexeId(db,e.succursaleId),-(e.amount||0));
     else if(e.subsidiaryId) addC("subsidiary",e.subsidiaryId,-(e.amount||0));
   });
   // 3) Mouvements de caisse (remontées / injections) entre caisses
@@ -3825,9 +3844,14 @@ function Dashboard({go}){
 
   // Filtre dépenses dans le périmètre nav
   const inScopeExp = (e) => {
-    if(e.annexeId && navAnnexes.includes(e.annexeId)) return true;
-    if(!e.annexeId && e.subsidiaryId && navSubs.includes(e.subsidiaryId)) return true;
-    if(!e.annexeId && !e.subsidiaryId && navAnnexes.length > 0) return true;
+    if(e.annexeId){
+      // Résoudre : annexeId peut contenir un suc-ID legacy
+      const resolvedAnnexeId=resolveToAnnexeId(db,e.annexeId);
+      if(navAnnexes.includes(resolvedAnnexeId)) return true;
+    } else {
+      if(e.subsidiaryId && navSubs.includes(e.subsidiaryId)) return true;
+      if(!e.subsidiaryId && navAnnexes.length > 0) return true;
+    }
     return false;
   };
 
@@ -6626,7 +6650,7 @@ function VendorCashPanel({vendors,balances,totalCash}){
   // Vendeurs filtrés pour l'onglet Remises
   const allVendorsFiltered=vendors.filter(v=>{
     if(fSolde==="positif"&&(balances[v.id]||0)<=0) return false;
-    if(fAnnexeRemise&&v.succursaleId!==fAnnexeRemise&&v.assignmentId!==fAnnexeRemise) return false;
+    if(fAnnexeRemise&&v.succursaleId!==fAnnexeRemise&&resolveToAnnexeId(db,v.assignmentId)!==fAnnexeRemise&&resolveToAnnexeId(db,v.succursaleId)!==fAnnexeRemise) return false;
     if(qRemise.trim()){
       const suc=(db.succursales||[]).find(s=>s.id===v.succursaleId);
       const ann=annexeById(v.assignmentId);
@@ -14388,7 +14412,8 @@ function Permanences(){
         };
       } else {
         const start=d.permanences[idx].arrivedAt;
-        const dh=start?Math.round((new Date(now)-new Date(start))/3600000*10)/10:null;
+        const dhRaw=start?Math.round((new Date(now)-new Date(start))/3600000*10)/10:null;
+        const dh=dhRaw!==null?Math.min(dhRaw,6):null; // plafond 6h
         d.permanences[idx]={...d.permanences[idx],
           departedAt:now, departureSig:sig,
           departureLat:lat, departureLng:lng,
@@ -14436,6 +14461,7 @@ function Permanences(){
       <div style={{display:"flex",gap:0,borderBottom:"2px solid var(--line)"}}>
         {[
           {id:"permanences",label:`🕐 Permanences (${perms.length})`},
+          {id:"paiecalc",label:`📊 Calcul paie`},
           {id:"paiements",label:`💰 Historique paiements (${(db.permanencePayments||[]).filter(p=>scopedEmps.some(e=>e.id===p.employeeId)).length})`},
         ].map(t=>(
           <button key={t.id} onClick={()=>setMainTab(t.id)}
@@ -14447,6 +14473,7 @@ function Permanences(){
         ))}
       </div>
       {mainTab==="paiements" && <PermanencePayments employees={scopedEmps} canPay={canPay} db={db} mutate={mutate} user={user} annexeById={annexeById}/>}
+      {mainTab==="paiecalc" && <PermanencePayCalc employees={scopedEmps} canPay={canPay} db={db} mutate={mutate} user={user} annexeById={annexeById}/>}
       {mainTab==="permanences" && (<>
       {/* KPIs */}
       <div className="row">
@@ -14572,7 +14599,8 @@ function Permanences(){
       {signFor&&<SignatureModal
         title={signFor.type==="arrival"?"✍ Signature d'arrivée":"🚪 Signature de départ"}
         onSave={(data)=>doSign(signFor.perm,signFor.type,data)}
-        onClose={()=>setSignFor(null)}/>}
+        onClose={()=>setSignFor(null)}
+        requireGps={true}/>}
 
       {/* Modal détail */}
       {detail&&<PermanenceDetailModal perm={detail} employees={scopedEmps} annexeById={annexeById} onClose={()=>setDetail(null)} canSign={canSign} canDelete={canDelete} onSign={(type)=>{setSignFor({perm:detail,type});setDetail(null);}} onPrint={printPerm} mutate={mutate}/>}
@@ -14675,6 +14703,361 @@ function PermanencePayModal({perm,employees,onClose,mutate,user,annexeById,db}){
   );
 }
 
+/* ====== Calcul paie permanences par employé ====== */
+function PermanencePayCalc({employees,canPay,db,mutate,user,annexeById}){
+  const {nav}=useApp();
+  const [fGran,setFGran]=useState("month");
+  const [fDate,setFDate]=useState(today());
+  const [payingEmp,setPayingEmp]=useState(null); // {empId, total, hours, permsIds}
+  const [taux,setTaux]=useState({}); // {empId: tauxHoraire}
+  const [saving,setSaving]=useState(false);
+  const [paid,setPaid]=useState({}); // local optimistic
+
+  const inPeriod=(dateStr)=>{
+    if(!dateStr) return false;
+    if(fGran==="week") return weekKey(dateStr)===weekKey(fDate);
+    if(fGran==="month") return dateStr.slice(0,7)===fDate.slice(0,7);
+    if(fGran==="year") return dateStr.slice(0,4)===fDate.slice(0,4);
+    return true;
+  };
+
+  const navigate=(dir)=>{
+    const d=new Date(fDate);
+    if(fGran==="week") d.setDate(d.getDate()+dir*7);
+    else if(fGran==="month") d.setMonth(d.getMonth()+dir);
+    else if(fGran==="year") d.setFullYear(d.getFullYear()+dir);
+    setFDate(d.toISOString().slice(0,10));
+  };
+
+  const periodLabel=()=>{
+    if(fGran==="week") return weekLabelFull(weekKey(fDate));
+    if(fGran==="month") return monthLabel(fDate.slice(0,7));
+    return fDate.slice(0,4);
+  };
+
+  const navAnnexeIds=(db.annexes||[]).filter(a=>{
+    if(nav.level==="holding") return true;
+    if(nav.level==="subsidiary") return a.subsidiaryId===nav.id;
+    if(nav.level==="annexe") return a.id===nav.id;
+    if(nav.level==="succursale"){const s=(db.succursales||[]).find(x=>x.id===nav.id);return s&&a.id===s.annexeId;}
+    return false;
+  }).map(a=>a.id);
+
+  // Permanences complètes de la période pour les employés du périmètre
+  // On inclut status="completed" ET les permanences qui ont déjà un paiement enregistré (payées à l'unité)
+  const paidPermIds=new Set((db.permanencePayments||[]).map(pp=>pp.permanenceId).filter(Boolean));
+  const permsInPeriod=(db.permanences||[]).filter(p=>{
+    if(p.status!=="completed" && !paidPermIds.has(p.id)) return false;
+    if(!inPeriod(p.date)) return false;
+    if(!employees.some(e=>e.id===p.employeeId)) return false;
+    if(p.annexeId){
+      const rId=resolveToAnnexeId(db,p.annexeId);
+      if(!navAnnexeIds.includes(rId)) return false;
+    }
+    return true;
+  });
+
+  // Groupement par employé
+  const byEmp=useMemo(()=>{
+    const map={};
+    permsInPeriod.forEach(p=>{
+      if(!map[p.employeeId]) map[p.employeeId]={perms:[],totalH:0};
+      map[p.employeeId].perms.push(p);
+      map[p.employeeId].totalH+=parseFloat(p.durationH||0);
+    });
+    return map;
+  },[permsInPeriod.map(p=>p.id).join(","), fGran, fDate]);
+
+  // Paiements déjà effectués dans la période pour éviter double-paiement
+  const alreadyPaid=useMemo(()=>{
+    const set=new Set();
+    (db.permanencePayments||[]).forEach(pp=>{
+      if(inPeriod(pp.date||pp.paidAt?.slice(0,10))) set.add(pp.employeeId+"_"+pp.periodKey);
+    });
+    return set;
+  },[db.permanencePayments, fGran, fDate]);
+
+  const periodKey=()=>{
+    if(fGran==="week") return weekKey(fDate);
+    if(fGran==="month") return fDate.slice(0,7);
+    return fDate.slice(0,4);
+  };
+
+  const rows=employees.filter(e=>byEmp[e.id]).map(e=>{
+    const info=byEmp[e.id];
+    const tauxH=parseFloat(taux[e.id]??e.tauxHoraire??167);
+    const total=Math.round(info.totalH*tauxH*100)/100;
+    const pKey=e.id+"_"+periodKey();
+    // Payé si : paiement groupé par période OU toutes les permanences de l'employé ont un paiement individuel
+    const paidByPeriod=paid[pKey]||(db.permanencePayments||[]).some(pp=>pp.employeeId===e.id&&pp.periodKey===periodKey());
+    const allPermsPaid=info.perms.length>0&&info.perms.every(p=>paidPermIds.has(p.id));
+    const isPaid=paidByPeriod||allPermsPaid;
+    // Nombre de permanences déjà payées (paiement individuel)
+    const nbPaidPerms=info.perms.filter(p=>paidPermIds.has(p.id)).length;
+    return {emp:e, perms:info.perms, totalH:info.totalH, tauxH, total, isPaid, pKey, nbPaidPerms};
+  }).sort((a,b)=>a.emp.name.localeCompare(b.emp.name));
+
+  const grandTotal=rows.reduce((s,r)=>s+(r.total||0),0);
+  const totalUnpaid=rows.filter(r=>!r.isPaid).reduce((s,r)=>s+(r.total||0),0);
+
+  const doPay=async(row)=>{
+    setSaving(true);
+    const ref="PAY-PERM-"+Date.now().toString(36).toUpperCase();
+    const newPay={
+      id:"pp_"+Date.now(),
+      ref,
+      employeeId:row.emp.id,
+      periodKey:periodKey(),
+      periodLabel:periodLabel(),
+      granularite:fGran,
+      nbPerms:row.perms.length,
+      totalH:row.totalH,
+      tauxHoraire:row.tauxH,
+      total:row.total,
+      permIds:row.perms.map(p=>p.id),
+      date:today(),
+      paidAt:new Date().toISOString(),
+      paidBy:user.id,
+    };
+    await mutate(d=>{
+      d.permanencePayments=[...(d.permanencePayments||[]),newPay];
+      return d;
+    });
+    setPaid(prev=>({...prev,[row.pKey]:true}));
+    setPayingEmp(null);
+    setSaving(false);
+  };
+
+  const printBulletin=(row)=>{
+    const fmtH=(iso)=>iso?new Date(iso).toLocaleTimeString("fr-FR",{hour:"2-digit",minute:"2-digit"}):"—";
+    const fmtD=(s)=>s?new Date(s+"T00:00:00").toLocaleDateString("fr-FR",{weekday:"long",day:"2-digit",month:"long",year:"numeric"}):"—";
+    const ann=row.perms.length>0?annexeById(row.perms[0].annexeId):null;
+
+    const lignesPerms=row.perms
+      .slice().sort((a,b)=>a.date.localeCompare(b.date))
+      .map((p,i)=>{
+        const duree=parseFloat(p.durationH||0);
+        const montantLigne=Math.round(duree*row.tauxH*100)/100;
+        const estPaye=paidPermIds.has(p.id);
+        return `
+          <tr>
+            <td class="mono">${i+1}</td>
+            <td>${fmtD(p.date)}</td>
+            <td class="right mono">${fmtH(p.arrivedAt)}</td>
+            <td class="right mono">${fmtH(p.departedAt)}</td>
+            <td class="right mono"><b>${duree.toFixed(1)}h</b></td>
+            <td class="right mono">${fmt(row.tauxH)} F</td>
+            <td class="right mono"><b>${fmt(montantLigne)} F</b></td>
+            <td style="text-align:center">${estPaye?'<span style="background:#22C55E;color:#fff;border-radius:4px;padding:1px 7px;font-size:8pt;font-weight:700;">✓ Payé</span>':'<span style="background:#FEF3C7;color:#92400E;border-radius:4px;padding:1px 7px;font-size:8pt;font-weight:700;">En attente</span>'}</td>
+          </tr>`;
+      }).join("");
+
+    const body=`
+      <div class="kpis">
+        <div class="kpi"><div class="l">Employé</div><div class="v" style="font-size:14pt">${esc(row.emp.name)}</div></div>
+        <div class="kpi"><div class="l">Période</div><div class="v" style="font-size:12pt">${esc(periodLabel())}</div></div>
+        <div class="kpi"><div class="l">Filiale / Annexe</div><div class="v" style="font-size:12pt">${esc(ann?.code||ann?.name||"—")}</div></div>
+      </div>
+
+      <div class="kpis" style="margin-top:0">
+        <div class="kpi"><div class="l">Nombre de permanences</div><div class="v">${row.perms.length}</div></div>
+        <div class="kpi"><div class="l">Total heures travaillées</div><div class="v">${row.totalH.toFixed(1)} h</div></div>
+        <div class="kpi"><div class="l">Taux horaire</div><div class="v">${fmt(row.tauxH)} F/h</div></div>
+        <div class="kpi" style="background:#EEF0FF;border-color:#4B3FE4"><div class="l">MONTANT NET À PAYER</div><div class="v" style="font-size:16pt;color:#4B3FE4">${fmt(row.total)} F</div></div>
+      </div>
+
+      <table style="margin-top:16px">
+        <thead>
+          <tr>
+            <th style="width:30px">#</th>
+            <th>Date de permanence</th>
+            <th class="right">Arrivée</th>
+            <th class="right">Départ</th>
+            <th class="right">Heures</th>
+            <th class="right">Taux/h</th>
+            <th class="right">Montant</th>
+            <th style="text-align:center">Statut</th>
+          </tr>
+        </thead>
+        <tbody>${lignesPerms}</tbody>
+        <tfoot>
+          <tr>
+            <td colspan="4"><b>TOTAL PÉRIODE</b></td>
+            <td class="right mono"><b>${row.totalH.toFixed(1)}h</b></td>
+            <td class="right mono">${fmt(row.tauxH)} F</td>
+            <td class="right mono"><b>${fmt(row.total)} F</b></td>
+            <td></td>
+          </tr>
+        </tfoot>
+      </table>
+
+      <div style="margin-top:28px;display:flex;gap:20px;">
+        <div style="flex:1;border-top:1.5px solid #1A1535;padding-top:8px;text-align:center;font-size:9.5pt;color:#555">
+          <div style="font-weight:700">L'employé</div>
+          <div style="margin-top:4px">${esc(row.emp.name)}</div>
+          <div style="height:50px"></div>
+          <div>Signature & date</div>
+        </div>
+        <div style="flex:1;border-top:1.5px solid #1A1535;padding-top:8px;text-align:center;font-size:9.5pt;color:#555">
+          <div style="font-weight:700">Le responsable</div>
+          <div style="margin-top:4px">&nbsp;</div>
+          <div style="height:50px"></div>
+          <div>Signature & date</div>
+        </div>
+        <div style="flex:1;border-top:1.5px solid #1A1535;padding-top:8px;text-align:center;font-size:9.5pt;color:#555">
+          <div style="font-weight:700">La direction</div>
+          <div style="margin-top:4px">&nbsp;</div>
+          <div style="height:50px"></div>
+          <div>Cachet & signature</div>
+        </div>
+      </div>
+
+      <div style="margin-top:20px;font-size:8.5pt;color:#888;border-top:1px solid #eee;padding-top:8px;text-align:center">
+        Ce bulletin de paie est établi conformément aux permanences enregistrées dans le système de gestion GENERATION X.
+        Toute contestation doit être signalée dans les 7 jours suivant la réception de ce document.
+      </div>`;
+
+    printDocument({
+      title:"Bulletin de paie — Permanences",
+      subtitle:row.emp.name,
+      scope:ann?.code||"",
+      period:periodLabel(),
+      body,
+    });
+  };
+
+  return(
+    <div style={{display:"flex",flexDirection:"column",gap:16}}>
+      {/* En-tête période */}
+      <div style={{display:"flex",flexWrap:"wrap",gap:8,alignItems:"center"}}>
+        <div style={{display:"flex",alignItems:"center",gap:4,background:"var(--bg2)",borderRadius:9,padding:"4px 8px"}}>
+          <button className="btn sm ghost" onClick={()=>navigate(-1)}>‹</button>
+          <select value={fGran} onChange={e=>setFGran(e.target.value)} style={{border:"none",background:"transparent",fontWeight:600,fontSize:13,cursor:"pointer"}}>
+            <option value="week">Semaine</option>
+            <option value="month">Mois</option>
+            <option value="year">Année</option>
+          </select>
+          <button className="btn sm ghost" onClick={()=>navigate(1)}>›</button>
+        </div>
+        <span style={{fontWeight:700,fontSize:14,color:"var(--brand)"}}>{periodLabel()}</span>
+        <button className="btn sm ghost" onClick={()=>setFDate(today())} style={{marginLeft:4}}>Aujourd'hui</button>
+      </div>
+
+      {/* KPIs résumé */}
+      {rows.length>0&&(
+        <div className="row">
+          <KPI label="Employés avec permanences" value={rows.length} delta="cette période"/>
+          <KPI label="Total heures" value={rows.reduce((s,r)=>s+r.totalH,0).toFixed(1)+"h"} delta="permanences complètes"/>
+          <KPI label="Montant total dû" value={fmt(grandTotal)+" F"} accent="var(--brand)" delta="avant déduction payés"/>
+          <KPI label="Reste à payer" value={fmt(totalUnpaid)+" F"} accent={totalUnpaid>0?"#E57C00":"#22C55E"} delta="non encore payé"/>
+        </div>
+      )}
+
+      {rows.length===0&&(
+        <div style={{textAlign:"center",color:"var(--muted)",padding:40,background:"var(--bg2)",borderRadius:12}}>
+          <div style={{fontSize:32,marginBottom:8}}>💼</div>
+          <div style={{fontWeight:600}}>Aucune permanence complète sur cette période</div>
+          <div style={{fontSize:12,marginTop:4}}>Changez la période ou vérifiez les permanences enregistrées</div>
+        </div>
+      )}
+
+      {rows.length>0&&(
+        <div className="card" style={{overflow:"auto"}}>
+          <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
+            <thead>
+              <tr style={{background:"var(--bg2)",textAlign:"left"}}>
+                <th style={{padding:"10px 12px",fontWeight:700,borderBottom:"2px solid var(--line)"}}>Employé</th>
+                <th style={{padding:"10px 12px",fontWeight:700,borderBottom:"2px solid var(--line)",textAlign:"center"}}>Permanences</th>
+                <th style={{padding:"10px 12px",fontWeight:700,borderBottom:"2px solid var(--line)",textAlign:"center"}}>Total heures</th>
+                <th style={{padding:"10px 12px",fontWeight:700,borderBottom:"2px solid var(--line)",textAlign:"center"}}>Taux horaire (F)</th>
+                <th style={{padding:"10px 12px",fontWeight:700,borderBottom:"2px solid var(--line)",textAlign:"right"}}>Montant dû</th>
+                <th style={{padding:"10px 12px",fontWeight:700,borderBottom:"2px solid var(--line)",textAlign:"center"}}>Statut</th>
+                <th style={{padding:"10px 12px",fontWeight:700,borderBottom:"2px solid var(--line)",textAlign:"center"}}>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row,i)=>(
+                <tr key={row.emp.id} style={{borderBottom:"1px solid var(--line)",background:i%2===0?"":"var(--bg2)"}}>
+                  <td style={{padding:"10px 12px"}}>
+                    <div style={{fontWeight:600}}>{row.emp.name}</div>
+                    <div style={{fontSize:11,color:"var(--muted)"}}>{row.perms.map(p=>p.date).sort().join(", ")}</div>
+                  </td>
+                  <td style={{padding:"10px 12px",textAlign:"center"}}>
+                    <span style={{background:"var(--brand)",color:"#fff",borderRadius:20,padding:"2px 10px",fontSize:12,fontWeight:700}}>{row.perms.length}</span>
+                  </td>
+                  <td style={{padding:"10px 12px",textAlign:"center",fontWeight:600}}>{row.totalH.toFixed(1)}h</td>
+                  <td style={{padding:"10px 12px",textAlign:"center"}}>
+                    <input type="number" min="0" step="100"
+                      value={taux[row.emp.id]??row.emp.tauxHoraire??167}
+                      onChange={e=>setTaux(prev=>({...prev,[row.emp.id]:e.target.value}))}
+                      style={{width:90,padding:"4px 8px",border:"1px solid var(--line)",borderRadius:6,textAlign:"center",fontSize:13}}
+                      placeholder="0"/>
+                  </td>
+                  <td style={{padding:"10px 12px",textAlign:"right",fontWeight:700,fontSize:14,color:row.total>0?"var(--brand)":"var(--muted)"}}>
+                    {row.tauxH>0?fmt(row.total)+" F":"—"}
+                  </td>
+                  <td style={{padding:"10px 12px",textAlign:"center"}}>
+                    {row.isPaid
+                      ?<span style={{background:"#22C55E",color:"#fff",borderRadius:20,padding:"3px 12px",fontSize:12,fontWeight:700}}>✓ Payé</span>
+                      :row.nbPaidPerms>0
+                        ?<span style={{background:"#DBEAFE",color:"#1D4ED8",borderRadius:20,padding:"3px 12px",fontSize:12,fontWeight:700}}>{row.nbPaidPerms}/{row.perms.length} payées</span>
+                        :<span style={{background:"#FEF3C7",color:"#92400E",borderRadius:20,padding:"3px 12px",fontSize:12,fontWeight:700}}>En attente</span>}
+                  </td>
+                  <td style={{padding:"10px 12px",textAlign:"center"}}>
+                    <div style={{display:"flex",gap:6,justifyContent:"center",flexWrap:"wrap"}}>
+                      <button className="btn sm ghost" title="Imprimer le bulletin de paie" onClick={()=>printBulletin(row)}>🖨 Bulletin</button>
+                      {canPay&&!row.isPaid&&row.tauxH>0&&row.total>0&&(
+                        <button className="btn sm accent" onClick={()=>setPayingEmp(row)}>Payer</button>
+                      )}
+                      {canPay&&!row.isPaid&&(!row.tauxH||row.total===0)&&(
+                        <span style={{fontSize:11,color:"var(--muted)"}}>Définir le taux</span>
+                      )}
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+            <tfoot>
+              <tr style={{background:"var(--bg2)",fontWeight:700}}>
+                <td style={{padding:"10px 12px",borderTop:"2px solid var(--line)"}}>TOTAL</td>
+                <td style={{padding:"10px 12px",textAlign:"center",borderTop:"2px solid var(--line)"}}>{rows.reduce((s,r)=>s+r.perms.length,0)}</td>
+                <td style={{padding:"10px 12px",textAlign:"center",borderTop:"2px solid var(--line)"}}>{rows.reduce((s,r)=>s+r.totalH,0).toFixed(1)}h</td>
+                <td style={{padding:"10px 12px",borderTop:"2px solid var(--line)"}}></td>
+                <td style={{padding:"10px 12px",textAlign:"right",borderTop:"2px solid var(--line)",color:"var(--brand)",fontSize:15}}>{fmt(grandTotal)} F</td>
+                <td style={{padding:"10px 12px",borderTop:"2px solid var(--line)"}}></td>
+                <td style={{padding:"10px 12px",borderTop:"2px solid var(--line)"}}></td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      )}
+
+      {/* Modal confirmation paiement */}
+      {payingEmp&&(
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.45)",zIndex:2000,display:"flex",alignItems:"center",justifyContent:"center"}} onClick={e=>{if(e.target===e.currentTarget)setPayingEmp(null);}}>
+          <div style={{background:"var(--card)",borderRadius:16,padding:28,maxWidth:440,width:"90%",boxShadow:"0 8px 40px rgba(0,0,0,.25)"}}>
+            <div style={{fontWeight:700,fontSize:17,marginBottom:16}}>💸 Confirmer le paiement</div>
+            <table style={{width:"100%",borderCollapse:"collapse",marginBottom:16,fontSize:14}}>
+              <tbody>
+                <tr><td style={{padding:"6px 0",color:"var(--muted)"}}>Employé</td><td style={{fontWeight:700}}>{payingEmp.emp.name}</td></tr>
+                <tr><td style={{padding:"6px 0",color:"var(--muted)"}}>Période</td><td style={{fontWeight:600}}>{periodLabel()}</td></tr>
+                <tr><td style={{padding:"6px 0",color:"var(--muted)"}}>Permanences</td><td style={{fontWeight:600}}>{payingEmp.perms.length} permanences</td></tr>
+                <tr><td style={{padding:"6px 0",color:"var(--muted)"}}>Total heures</td><td style={{fontWeight:600}}>{payingEmp.totalH.toFixed(1)}h</td></tr>
+                <tr><td style={{padding:"6px 0",color:"var(--muted)"}}>Taux horaire</td><td style={{fontWeight:600}}>{fmt(payingEmp.tauxH)} F/h</td></tr>
+                <tr style={{borderTop:"2px solid var(--line)"}}><td style={{padding:"8px 0",fontWeight:700,fontSize:15}}>MONTANT DÛ</td><td style={{fontWeight:800,fontSize:17,color:"var(--brand)"}}>{fmt(payingEmp.total)} F</td></tr>
+              </tbody>
+            </table>
+            <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
+              <button className="btn ghost" onClick={()=>setPayingEmp(null)}>Annuler</button>
+              <button className="btn accent" onClick={()=>doPay(payingEmp)} disabled={saving}>{saving?"…":"✓ Confirmer le paiement"}</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* Historique des paiements de permanence */
 function PermanencePayments({employees,canPay,db,mutate,user,annexeById}){
   const {nav}=useApp();
@@ -14728,7 +15111,7 @@ function PermanencePayments({employees,canPay,db,mutate,user,annexeById}){
       if(!inPeriod(p.date)) return false;
       // Filtre périmètre par annexe de la permanence associée
       const perm=(db.permanences||[]).find(x=>x.id===p.permanenceId);
-      const permAnnexeId=perm?.annexeId||null;
+      const permAnnexeId=perm?.annexeId?resolveToAnnexeId(db,perm.annexeId):null;
       if(permAnnexeId && !navAnnexeIds.includes(permAnnexeId)) return false;
       return true;
     })
@@ -14736,7 +15119,7 @@ function PermanencePayments({employees,canPay,db,mutate,user,annexeById}){
       if(fEmp&&p.employeeId!==fEmp) return false;
       if(fAnnexe){
         const perm=(db.permanences||[]).find(x=>x.id===p.permanenceId);
-        if(!perm||perm.annexeId!==fAnnexe) return false;
+        if(!perm||resolveToAnnexeId(db,perm.annexeId)!==fAnnexe) return false;
       }
       if(q.trim()){
         const emp=employees.find(e=>e.id===p.employeeId);
