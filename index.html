@@ -15108,9 +15108,9 @@ function PermanencePayments({employees,canPay,db,mutate,user,annexeById}){
   const pays=(db.permanencePayments||[])
     .filter(p=>{
       if(!empIds.has(p.employeeId)) return false;
-      if(!inPeriod(p.date)) return false;
-      // Filtre périmètre par annexe de la permanence associée
+      // Filtre par DATE DE PERMANENCE (et non date de paiement)
       const perm=(db.permanences||[]).find(x=>x.id===p.permanenceId);
+      if(!inPeriod(perm?.date)) return false;
       const permAnnexeId=perm?.annexeId?resolveToAnnexeId(db,perm.annexeId):null;
       if(permAnnexeId && !navAnnexeIds.includes(permAnnexeId)) return false;
       return true;
