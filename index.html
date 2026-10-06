@@ -14257,15 +14257,9 @@ function Permanences(){
     }
     if(nav.level==="holding") return true;
     if(nav.level==="subsidiary"){
-      const aid=resolveEmpAnnexe(e);
-      const suc=(db.succursales||[]).find(s=>s.id===aid);
-      const empAnnexeId=suc?suc.annexeId:aid;
-      const annexe=(db.annexes||[]).find(a=>a.id===empAnnexeId);
-      if(!annexe||annexe.subsidiaryId!==nav.id) return false;
-      // Techniciens multi-annexes : vérifier aussi via annexeIds
-      if(e.annexeIds&&e.annexeIds.length>0){
+      // Employés custom (annexeIds) : vérifier d'abord via annexeIds
+      if(e.level==="custom"&&Array.isArray(e.annexeIds)&&e.annexeIds.length>0){
         return e.annexeIds.some(aid2=>{
-          // Peut être une annexe ou une succursale
           const a2=(db.annexes||[]).find(a=>a.id===aid2);
           if(a2) return a2.subsidiaryId===nav.id;
           const s2=(db.succursales||[]).find(s=>s.id===aid2);
@@ -14273,6 +14267,11 @@ function Permanences(){
           return false;
         });
       }
+      const aid=resolveEmpAnnexe(e);
+      const suc=(db.succursales||[]).find(s=>s.id===aid);
+      const empAnnexeId=suc?suc.annexeId:aid;
+      const annexe=(db.annexes||[]).find(a=>a.id===empAnnexeId);
+      if(!annexe||annexe.subsidiaryId!==nav.id) return false;
       return true;
     }
     if(nav.level==="annexe"){
@@ -14324,7 +14323,17 @@ function Permanences(){
   const perms=(db.permanences||[]).filter(p=>{
     // Filtrer par annexeId sur la permanence (priorité), sinon via l'employé
     if(p.annexeId){
-      if(nav.level!=="holding"&&!navAnnexeIds.includes(p.annexeId)) return false;
+      // Résoudre : p.annexeId peut être une annexe ID ou une succursale ID (données legacy)
+      const permAnnexeId=(()=>{
+        if(navAnnexeIds.includes(p.annexeId)) return p.annexeId; // c'est déjà une annexe ID
+        const suc=(db.succursales||[]).find(s=>s.id===p.annexeId);
+        return suc?suc.annexeId:p.annexeId; // résoudre succursale → annexe parente
+      })();
+      if(nav.level!=="holding"&&!navAnnexeIds.includes(permAnnexeId)) return false;
+      // Restriction userScope : si l'utilisateur a un périmètre succursale, vérifier via l'employé
+      if(userScope?.sucIds?.length>0){
+        if(!scopedEmps.some(e=>e.id===p.employeeId)) return false;
+      }
     } else {
       if(!scopedEmps.some(e=>e.id===p.employeeId)) return false;
     }
@@ -14874,7 +14883,16 @@ function NewPermanenceModal({onClose,employees}){
   // Quand l'agent change, pré-remplir l'annexe automatiquement
   React.useEffect(()=>{
     const emp=eligibleEmps.find(e=>e.id===empId);
-    if(emp) setAnnexeId(emp.assignmentId||emp.annexeId||"");
+    if(emp){
+      // Pour les employés custom (annexeIds), prendre la première annexe disponible
+      let defAnnexe="";
+      if(emp.level==="custom"&&Array.isArray(emp.annexeIds)&&emp.annexeIds.length>0){
+        // Trouver la première vraie annexe dans annexeIds
+        const firstAnnexeId=emp.annexeIds.find(aid=>db.annexes.find(a=>a.id===aid));
+        defAnnexe=firstAnnexeId||"";
+      }
+      setAnnexeId(defAnnexe||emp.assignmentId||emp.annexeId||"");
+    }
   },[empId]);
 
   const annexes=db.annexes||[];
