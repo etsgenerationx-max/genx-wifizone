@@ -8298,7 +8298,14 @@ function assignmentLabel(db,e){
   if(e.level==="holding") return "HOLDING";
   if(e.level==="subsidiary") return db.subsidiaries.find(s=>s.id===e.assignmentId)?.code || "—";
   if(e.level==="custom" && Array.isArray(e.annexeIds)){
-    const codes=e.annexeIds.map(aid=>db.annexes.find(a=>a.id===aid)?.code).filter(Boolean);
+    // Les annexeIds peuvent contenir des IDs d'annexes OU de succursales
+    const codes=e.annexeIds.map(aid=>{
+      const annexe=db.annexes.find(a=>a.id===aid);
+      if(annexe) return annexe.code;
+      const suc=(db.succursales||[]).find(s=>s.id===aid);
+      if(suc) return suc.code||suc.name;
+      return null;
+    }).filter(Boolean);
     if(codes.length===0) return "—";
     if(codes.length<=2) return codes.join(" + ");
     return codes.slice(0,2).join(" + ")+" +"+(codes.length-2);
@@ -14225,26 +14232,45 @@ function Permanences(){
     if(e.succursaleId) return e.succursaleId;
     return e.assignmentId;
   };
+  // Résout les annexeIds d'un employé custom vers les succursaleIds couverts
+  const empSucIds=(e)=>{
+    if(e.level!=="custom"||!Array.isArray(e.annexeIds)) return e.succursaleId?[e.succursaleId]:[];
+    const ids=[];
+    e.annexeIds.forEach(aid=>{
+      // Si c'est directement une succursale
+      if((db.succursales||[]).find(s=>s.id===aid)){ ids.push(aid); return; }
+      // Si c'est une annexe → toutes ses succursales
+      if(db.annexes.find(a=>a.id===aid)){
+        (db.succursales||[]).filter(s=>s.annexeId===aid).forEach(s=>ids.push(s.id));
+      }
+    });
+    return ids;
+  };
   const scopedEmps=(db.employees||[]).filter(e=>{
     if(e.active===false) return false;
-    // Filtrer par succursales autorisées si défini
-    if(userScope?.sucIds?.length>0&&e.role==="vendeur"&&e.succursaleId){
-      if(!userScope.sucIds.includes(e.succursaleId)) return false;
+    // Filtrer par succursales autorisées (userScope) — s'applique à tous les rôles, pas seulement vendeurs
+    if(userScope?.sucIds?.length>0){
+      const eSucIds=e.succursaleId?[e.succursaleId]:empSucIds(e);
+      // L'employé doit avoir AU MOINS une succursale dans le périmètre autorisé
+      // Exception : employés sans succursale (niveau holding/subsidiary) passent toujours
+      if(eSucIds.length>0&&!eSucIds.some(sid=>userScope.sucIds.includes(sid))) return false;
     }
     if(nav.level==="holding") return true;
     if(nav.level==="subsidiary"){
       const aid=resolveEmpAnnexe(e);
       const suc=(db.succursales||[]).find(s=>s.id===aid);
       const empAnnexeId=suc?suc.annexeId:aid;
-      // Vérifier que l'annexe appartient EXACTEMENT à cette filiale
-      // et que l'annexe fait partie du périmètre de navigation
       const annexe=(db.annexes||[]).find(a=>a.id===empAnnexeId);
       if(!annexe||annexe.subsidiaryId!==nav.id) return false;
-      // Vérifier aussi via annexeIds pour les techniciens multi-annexes
+      // Techniciens multi-annexes : vérifier aussi via annexeIds
       if(e.annexeIds&&e.annexeIds.length>0){
         return e.annexeIds.some(aid2=>{
+          // Peut être une annexe ou une succursale
           const a2=(db.annexes||[]).find(a=>a.id===aid2);
-          return a2&&a2.subsidiaryId===nav.id;
+          if(a2) return a2.subsidiaryId===nav.id;
+          const s2=(db.succursales||[]).find(s=>s.id===aid2);
+          if(s2){const a3=(db.annexes||[]).find(a=>a.id===s2.annexeId);return a3&&a3.subsidiaryId===nav.id;}
+          return false;
         });
       }
       return true;
@@ -14254,13 +14280,25 @@ function Permanences(){
       const suc=(db.succursales||[]).find(s=>s.id===aid);
       const empAnnexeId=suc?suc.annexeId:aid;
       if(empAnnexeId===nav.id) return true;
-      // Techniciens multi-annexes
-      if(e.annexeIds&&e.annexeIds.includes(nav.id)) return true;
+      // Techniciens multi-annexes (annexeIds contient des annexes ou succursales)
+      if(e.annexeIds&&e.annexeIds.length>0){
+        return e.annexeIds.some(aid2=>{
+          if(aid2===nav.id) return true;
+          const s2=(db.succursales||[]).find(s=>s.id===aid2);
+          return s2&&s2.annexeId===nav.id;
+        });
+      }
       return false;
     }
     if(nav.level==="succursale"){
       const suc=(db.succursales||[]).find(s=>s.id===nav.id);
-      return e.succursaleId===nav.id||(suc&&e.assignmentId===suc.annexeId&&!e.succursaleId);
+      if(e.succursaleId===nav.id) return true;
+      if(suc&&e.assignmentId===suc.annexeId&&!e.succursaleId) return true;
+      // Employés custom dont une affectation couvre cette succursale
+      if(e.level==="custom"&&Array.isArray(e.annexeIds)){
+        return e.annexeIds.some(aid2=>aid2===nav.id||(suc&&aid2===suc.annexeId));
+      }
+      return false;
     }
     return true;
   });
