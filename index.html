@@ -15421,13 +15421,11 @@ function Projects(){
     : p.subsidiaryId ? (subById(p.subsidiaryId)?.name||"") : "Holding";
   const norm=(s)=>(s||"").toString().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"");
 
-  // Numérotation globale — basée sur tous les projets du périmètre
-  // triés par date de création (startDate ASC) pour que le numéro soit stable
-  // et ne change pas quand un projet passe de En cours à Terminé.
+  // Numérotation globale — basée sur p.seq stocké dans le projet.
+  // Assigné une seule fois à la création côté client, jamais modifié.
   const globalNumMap=useMemo(()=>{
-    const all=[...scoped].sort((a,b)=>(a.startDate||a.id).localeCompare(b.startDate||b.id));
     const map={};
-    all.forEach((p,i)=>{ map[p.id]=String(i+1).padStart(3,"0"); });
+    scoped.forEach(p=>{ map[p.id]=p.seq ? String(p.seq).padStart(3,"0") : "???"; });
     return map;
   },[scoped]);
   const rattacheOptions=[...new Set(scopedFiltered.map(rattacheOf))].filter(Boolean).sort();
@@ -15652,7 +15650,7 @@ function ProjectModal({proj,onClose}){
   const {db,mutate,user}=useApp();
   const canDelete=hasPerm(db,user,"do:project_delete");
   const [f,setF]=useState(proj||{name:"",subsidiaryId:null,annexeId:null,succursaleId:null,type:"extension",status:"planifie",urgency:"normal",budget:0,spent:0,startDate:today(),dueDate:today(),progress:0,note:""});
-  const save=()=>{ if(!f.name)return; mutate(d=>{ const p={...f,urgency:f.urgency||"normal",budget:Number(f.budget)||0,spent:Number(f.spent)||0,progress:Number(f.progress)||0,subsidiaryId:f.subsidiaryId||null,annexeId:f.annexeId||null,succursaleId:f.succursaleId||null}; if(proj){const i=d.projects.findIndex(x=>x.id===proj.id);d.projects[i]=p;} else d.projects.push({id:uid("pr"),...p,createdAt:nowISO()}); }); onClose(); };
+  const save=()=>{ if(!f.name)return; mutate(d=>{ const p={...f,urgency:f.urgency||"normal",budget:Number(f.budget)||0,spent:Number(f.spent)||0,progress:Number(f.progress)||0,subsidiaryId:f.subsidiaryId||null,annexeId:f.annexeId||null,succursaleId:f.succursaleId||null}; if(proj){const i=d.projects.findIndex(x=>x.id===proj.id);d.projects[i]=p;} else { const nextSeq=(d.projects.reduce((m,x)=>Math.max(m,Number(x.seq)||0),0))+1; d.projects.push({id:uid("pr"),...p,seq:nextSeq,createdAt:nowISO()}); } }); onClose(); };
   const remove=()=>{ if(confirm(`Supprimer définitivement le projet « ${proj.name} » ? Cette action est irréversible.`)){ mutate(d=>{ d.projects=d.projects.filter(x=>x.id!==proj.id); }); onClose(); } };
   return (
     <Modal title={proj?"Modifier le projet":"Nouveau projet"} onClose={onClose}
