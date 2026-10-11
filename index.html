@@ -1117,8 +1117,7 @@ function printDocument({title,subtitle,scope,period,body,signatures,landscape,wi
     footer:document.body.dataset.printFooter||"GENERATION X · Holding multi-filiales · Document généré par l'application de gestion",
     logo:document.body.dataset.printLogo||"",
   };
-  const win=preWin||window.open("","_blank");
-  if(!win){ alert("Veuillez autoriser les fenêtres pop-up pour imprimer."); return; }
+  // Construire le HTML complet d'abord, puis ouvrir via Blob URL (évite le dialog Windows "about:")
   const html=`<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8"><title>${esc(title)} — ${esc(cfg.companyName)}</title>
   <style>
     @page { size: A4 ${landscape?"landscape":""}; margin: ${landscape?"10mm":"14mm"} 14mm; }
@@ -1167,8 +1166,12 @@ function printDocument({title,subtitle,scope,period,body,signatures,landscape,wi
     <`+`script>window.onload=function(){setTimeout(function(){window.print();},300);};<\/script>
   </body></html>`;
 
-  win.document.write(html);
-  win.document.close();
+  // Ouvrir via Blob URL pour éviter le dialog Windows sur "about:"
+  const blob=new Blob([html],{type:"text/html"});
+  const blobUrl=URL.createObjectURL(blob);
+  const win=preWin||window.open(blobUrl,"_blank");
+  if(!win){ URL.revokeObjectURL(blobUrl); alert("Veuillez autoriser les fenêtres pop-up pour imprimer."); return; }
+  setTimeout(()=>URL.revokeObjectURL(blobUrl), 60000);
 }
 
 // Bouton réutilisable
@@ -3221,11 +3224,10 @@ function HelpCenter({open,onClose}){
                 </div>`).join("")}
               <div class="footer">GENERATION X — Manuel utilisateur · ${now}</div>
             </body></html>`;
-            const w=window.open("","_blank","width=900,height=700");
-            w.document.write(html);
-            w.document.close();
-            w.focus();
-            setTimeout(()=>w.print(),400);
+            const _blobM=new Blob([html],{type:"text/html"});
+            const _urlM=URL.createObjectURL(_blobM);
+            const w=window.open(_urlM,"_blank","width=900,height=700");
+            if(w){w.focus();setTimeout(()=>{w.print();setTimeout(()=>URL.revokeObjectURL(_urlM),60000);},400);}else{URL.revokeObjectURL(_urlM);}
           }} style={{background:"var(--ok)",color:"#fff",border:"none",borderRadius:7,padding:"6px 13px",fontSize:12,fontWeight:700,cursor:"pointer",display:"flex",alignItems:"center",gap:6}}>
             ⬇ Manuel PDF
           </button>
@@ -5702,7 +5704,155 @@ function CashJournal(){
   const scopeLabel = nav.level==="holding"?"Holding GENERATION X":nav.level==="subsidiary"?(subById(nav.id)?.name||""):nav.level==="succursale"?((db.succursales||[]).find(x=>x.id===nav.id)?.name||""):(annexeById(nav.id)?.code||"");
   const years=[...new Set([year,...(db.expenses||[]).map(e=>(e.date||"").slice(0,4)),...(db.cashMoves||[]).map(m=>(m.date||"").slice(0,4)),today().slice(0,4)])].filter(Boolean).sort().reverse();
 
+  // Helper: compute entries/exits for a specific month (YYYY-MM) using same logic as the component
+  const computeMonthEntries=(mo)=>{
+    const ent=[], ext=[];
+    const inMo=(dateStr)=>dateStr && dateStr.slice(0,7)===mo;
+    const inPeriodSaleMo=(s)=>{
+      if(!s.week) return inMo(s.weekEnd||(s.week?rangeFromWeekKey(s.week).end:""));
+      return monthOfWeek(s.week)===mo;
+    };
+    if(!(filialeMode&&(mode==="filiale"||mode==="annexes"))){
+      const byV={};
+      (db.sales||[]).forEach(s=>{
+        if(nav.level==="succursale"){
+          const bySucAnnexe=s.annexeId&&inScope("annexe",s.annexeId);
+          const bySellerOfSuc=sucVendorIds&&s.sellerId&&sucVendorIds.has(s.sellerId);
+          if(!bySucAnnexe&&!bySellerOfSuc) return;
+        } else { if(!s.annexeId||!inScope("annexe",s.annexeId)) return; }
+        if(!inPeriodSaleMo(s)) return;
+        const dt=saleDate(s); const v=s.revenue||0; if(v<=0) return;
+        const key=s.sellerId||("annexe:"+s.annexeId);
+        const label=empById(s.sellerId)?.name||annexeById(s.annexeId)?.code||"Vente";
+        if(!byV[key]) byV[key]={label,amount:0,date:dt};
+        byV[key].amount+=v;
+        if((dt||"")>(byV[key].date||"")) byV[key].date=dt;
+      });
+      Object.values(byV).forEach(e=>ent.push(e));
+      (db.expenses||[]).forEach(e=>{
+        if(nav.level==="succursale"){
+          const matchDirect=(e.annexeId&&inScope("annexe",e.annexeId))||e.succursaleId===nav.id;
+          if(!matchDirect) return;
+        } else { if(!inScopeExpense(e)) return; }
+        if(!inMo(e.date)) return;
+        const v=e.amount||0; if(v>0) ext.push({date:e.date,label:"Dépense"+(e.category?" — "+e.category:"")+(e.note?" ("+e.note+")":""),amount:v});
+      });
+    } else if(mode==="filiale"){
+      const propreKey=nav.level==="holding"?"holding":cashKeyOf("subsidiary",nav.id);
+      const isPropre=(level,id)=>cashKeyOf(level,id)===propreKey;
+      (db.cashMoves||[]).forEach(m=>{ if(!inMo(m.date)) return; const v=m.amount||0; if(v<=0) return;
+        const fromKey=cashKeyOf(m.fromLevel,m.fromId), toKey=cashKeyOf(m.toLevel,m.toId);
+        if(toKey===propreKey) ent.push({date:m.date,label:"Remontée reçue de "+nameOf(m.fromLevel,m.fromId),amount:v});
+        if(fromKey===propreKey) ext.push({date:m.date,label:"Réinjection vers "+nameOf(m.toLevel,m.toId),amount:v});
+      });
+      (db.expenses||[]).forEach(e=>{ const level=e.level==="holding"?"holding":e.annexeId?"annexe":e.subsidiaryId?"subsidiary":null;
+        const id=e.level==="holding"?null:e.annexeId||e.subsidiaryId;
+        if(!level||!isPropre(level,id)) return; if(!inMo(e.date)) return;
+        const v=e.amount||0; if(v>0) ext.push({date:e.date,label:"Dépense"+(e.category?" — "+e.category:""),amount:v});
+      });
+      (db.bankMoves||[]).forEach(m=>{ if(!inMo(m.date)||!isPropre(m.fromLevel,m.fromId)) return; const v=m.amount||0; if(v<=0) return;
+        if(m.kind==="deposit") ext.push({date:m.date,label:"Dépôt en banque",amount:v});
+        else if(m.kind==="withdraw") ent.push({date:m.date,label:"Retrait de banque",amount:v});
+      });
+      (db.equityMoves||[]).forEach(m=>{ if(m.target!=="cash"||!isPropre(m.level,m.targetId)) return; if(!inMo(m.date)) return;
+        const v=m.amount||0; if(v<=0) return;
+        if(m.kind==="apport") ent.push({date:m.date,label:"Apport de fonds propres"+(m.note?" ("+m.note+")":""),amount:v});
+        else if(m.kind==="retrait") ext.push({date:m.date,label:"Retrait de fonds propres"+(m.note?" ("+m.note+")":""),amount:v});
+      });
+    } else {
+      const annexeKeys=new Set([...visibleKeys].filter(k=>k.startsWith("annexe:")));
+      const isAnnexe=(level,id)=>level==="annexe"&&annexeKeys.has(cashKeyOf("annexe",id));
+      const annCode=(id)=>annexeById(id)?.code||"Filiale";
+      (db.vendorCash||[]).forEach(m=>{ if(m.type!=="remise"||!m.annexeId||!isAnnexe("annexe",m.annexeId)) return;
+        if(!inMo(m.date)) return; const v=m.amount||0; if(v<=0) return;
+        ent.push({date:m.date,label:"Remise — "+(empById(m.vendorId)?.name||"Vendeur")+" → "+annCode(m.annexeId),amount:v});
+      });
+      (db.expenses||[]).forEach(e=>{ if(!inMo(e.date)) return; const v=e.amount||0; if(v<=0) return;
+        if(e.annexeId&&isAnnexe("annexe",e.annexeId)) ext.push({date:e.date,label:"Dépense — "+annCode(e.annexeId)+(e.category?" · "+e.category:""),amount:v});
+        else if(!e.annexeId&&e.subsidiaryId&&(db.annexes||[]).filter(a=>a.subsidiaryId===e.subsidiaryId).some(a=>isAnnexe("annexe",a.id)))
+          ext.push({date:e.date,label:"Dépense — "+(subById(e.subsidiaryId)?.code||"Filiale")+(e.category?" · "+e.category:""),amount:v});
+      });
+      (db.cashMoves||[]).forEach(m=>{ if(!inMo(m.date)) return; const v=m.amount||0; if(v<=0) return;
+        if(m.fromLevel==="vendeur") return;
+        if(isAnnexe(m.toLevel,m.toId)) ent.push({date:m.date,label:"Réinjection reçue — "+annCode(m.toId),amount:v});
+        if(isAnnexe(m.fromLevel,m.fromId)) ext.push({date:m.date,label:"Remontée — "+annCode(m.fromId),amount:v});
+      });
+      (db.bankMoves||[]).forEach(m=>{ if(!inMo(m.date)||!isAnnexe(m.fromLevel,m.fromId)) return; const v=m.amount||0; if(v<=0) return;
+        if(m.kind==="deposit") ext.push({date:m.date,label:"Dépôt en banque — "+annCode(m.fromId),amount:v});
+        else if(m.kind==="withdraw") ent.push({date:m.date,label:"Retrait de banque — "+annCode(m.fromId),amount:v});
+      });
+      (db.equityMoves||[]).forEach(m=>{ if(m.target!=="cash"||!isAnnexe(m.level,m.targetId)) return; if(!inMo(m.date)) return;
+        const v=m.amount||0; if(v<=0) return;
+        if(m.kind==="apport") ent.push({date:m.date,label:"Apport de fonds propres — "+annCode(m.targetId),amount:v});
+        else if(m.kind==="retrait") ext.push({date:m.date,label:"Retrait de fonds propres — "+annCode(m.targetId),amount:v});
+      });
+    }
+    return {ent, ext};
+  };
+
+  const buildMonthSection=(mo, isLast)=>{
+    const {ent, ext}=computeMonthEntries(mo);
+    const mIn=ent.reduce((s,x)=>s+x.amount,0);
+    const mOut=ext.reduce((s,x)=>s+x.amount,0);
+    const mSolde=mIn-mOut;
+    const maxLen=Math.max(ent.length,ext.length);
+    const rows=[];
+    for(let i=0;i<maxLen;i++){
+      const e=ent[i], x=ext[i];
+      rows.push(`<tr>
+        <td>${e?esc(e.date):""}</td><td>${e?esc(e.label):""}</td><td class="right mono">${e?esc(fcfa(e.amount)):""}</td>
+        <td class="right mono">${x?esc(fcfa(x.amount)):""}</td><td>${x?esc(x.label):""}</td><td>${x?esc(x.date):""}</td>
+      </tr>`);
+    }
+    const moLabel=new Date(mo+"-01").toLocaleString("fr-FR",{month:"long",year:"numeric"});
+    return `<div style="page-break-after:${isLast?"auto":"always"};">
+      <h2 style="font-size:14pt;color:#4B3FE4;border-bottom:2px solid #4B3FE4;padding-bottom:6px;margin:0 0 12px;">${esc(moLabel.charAt(0).toUpperCase()+moLabel.slice(1))}</h2>
+      <div class="kpis">
+        <div class="kpi"><div class="l">Total entrées</div><div class="v">${esc(fcfa(mIn))}</div></div>
+        <div class="kpi"><div class="l">Total sorties</div><div class="v">${esc(fcfa(mOut))}</div></div>
+        <div class="kpi"><div class="l">Solde</div><div class="v" style="color:${mSolde<0?"#C0392B":"#1B4F8A"}">${esc(fcfa(mSolde))}</div></div>
+      </div>
+      <table style="width:100%;border-collapse:collapse;margin-top:10px;" border="1">
+        <thead>
+          <tr style="background:#4B3FE4;color:#fff;"><th colspan="3">ENTRÉES</th><th colspan="3">SORTIES</th></tr>
+          <tr style="background:#eee;"><th>Date</th><th>Libellé (vendeur)</th><th>Montant</th><th>Montant</th><th>Libellé</th><th>Date</th></tr>
+        </thead>
+        <tbody>${rows.join("")||'<tr><td colspan="6" style="text-align:center;color:#888;padding:10px">Aucune écriture ce mois</td></tr>'}</tbody>
+        <tfoot><tr style="font-weight:bold;background:#f0f0f0;">
+          <td colspan="2">TOTAL ENTRÉES</td><td class="right mono">${esc(fcfa(mIn))}</td>
+          <td class="right mono">${esc(fcfa(mOut))}</td><td colspan="2">TOTAL SORTIES</td>
+        </tr></tfoot>
+      </table>
+    </div>`;
+  };
+
   const printJournal=()=>{
+    if(gran==="year"){
+      // Impression annuelle : tous les mois de l'année, un par page
+      const months=["01","02","03","04","05","06","07","08","09","10","11","12"];
+      // Calculer les totaux annuels pour le récapitulatif
+      let annIn=0, annOut=0;
+      const monthSections=months.map((mm,idx)=>{
+        const mo=year+"-"+mm;
+        // Accumulate annual totals
+        const {ent,ext}=computeMonthEntries(mo);
+        annIn+=ent.reduce((s,x)=>s+x.amount,0);
+        annOut+=ext.reduce((s,x)=>s+x.amount,0);
+        return buildMonthSection(mo, idx===11);
+      });
+      const annSolde=annIn-annOut;
+      const recapHtml=`<div style="page-break-after:always;">
+        <h2 style="font-size:15pt;color:#4B3FE4;border-bottom:3px solid #4B3FE4;padding-bottom:8px;margin:0 0 16px;">Récapitulatif annuel ${esc(year)}</h2>
+        <p style="margin-bottom:14px;"><b>Périmètre :</b> ${esc(scopeLabel)}</p>
+        <div class="kpis">
+          <div class="kpi"><div class="l">Total entrées ${esc(year)}</div><div class="v">${esc(fcfa(annIn))}</div></div>
+          <div class="kpi"><div class="l">Total sorties ${esc(year)}</div><div class="v">${esc(fcfa(annOut))}</div></div>
+          <div class="kpi"><div class="l">Solde annuel</div><div class="v" style="color:${annSolde<0?"#C0392B":"#1B4F8A"}">${esc(fcfa(annSolde))}</div></div>
+        </div>
+      </div>`;
+      const body=recapHtml+monthSections.join("");
+      printDocument({title:"Journal de caisse — Année "+year,subtitle:scopeLabel,scope:scopeLabel,period:"Année "+year,body,signatures:["Le caissier","La direction"]});
+    } else {
     const maxLen=Math.max(entries.length,exits.length);
     const rows=[];
     for(let i=0;i<maxLen;i++){
@@ -5731,6 +5881,7 @@ function CashJournal(){
         </tr></tfoot>
       </table>`;
     printDocument({title:"Journal de caisse",subtitle:scopeLabel,scope:scopeLabel,period:periodLabel,body,signatures:["Le caissier","La direction"]});
+    }
   };
 
   return (
@@ -10813,8 +10964,6 @@ function PartnerDivRow({p,dividend,paid,canPayDividend,canViewReleve,payDividend
       : `<div class="brand-mark">GX</div>`;
     const dateDoc=new Date().toLocaleDateString("fr-FR",{day:"2-digit",month:"long",year:"numeric"});
     const refReleve="REL-"+periodLabel_.replace(/\s/g,"-").toUpperCase()+"-"+p.id.slice(-4).toUpperCase();
-    const win=window.open("","_blank");
-    if(!win){alert("Autorisez les pop-ups pour imprimer.");return;}
     const html=`<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8">
 <title>Relevé de dividendes — ${esc(p.name)}</title>
 <style>
@@ -10983,8 +11132,11 @@ function PartnerDivRow({p,dividend,paid,canPayDividend,canViewReleve,payDividend
 </div>
 <script>window.onload=function(){setTimeout(function(){window.print();},350);};<\/script>
 </body></html>`;
-    win.document.write(html);
-    win.document.close();
+    const _blob1=new Blob([html],{type:"text/html"});
+    const _url1=URL.createObjectURL(_blob1);
+    const win=window.open(_url1,"_blank");
+    if(!win){URL.revokeObjectURL(_url1);alert("Autorisez les pop-ups pour imprimer.");return;}
+    setTimeout(()=>URL.revokeObjectURL(_url1),60000);
   };
 
   return (
@@ -11280,8 +11432,6 @@ function Investisseurs(){
     const now=new Date();
     const dateDoc=now.toLocaleDateString("fr-FR",{day:"2-digit",month:"long",year:"numeric"});
     // Montant en lettres (simple, FCFA)
-    const fmt=n=>n.toLocaleString("fr-FR");
-    const win=window.open("","_blank");
     if(!win){alert("Autorisez les pop-ups pour imprimer.");return;}
     const html=`<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8">
 <title>Bulletin de dividende — ${esc(p.name)}</title>
@@ -11431,8 +11581,11 @@ function Investisseurs(){
 </div>
 <script>window.onload=function(){setTimeout(function(){window.print();},350);};<\/script>
 </body></html>`;
-    win.document.write(html);
-    win.document.close();
+    const _blobBul=new Blob([html],{type:"text/html"});
+    const _urlBul=URL.createObjectURL(_blobBul);
+    const win=window.open(_urlBul,"_blank");
+    if(!win){URL.revokeObjectURL(_urlBul);alert("Autorisez les pop-ups pour imprimer.");return;}
+    setTimeout(()=>URL.revokeObjectURL(_urlBul),60000);
   };
 
   const payDividend=(p,preCalcDividend)=>{
@@ -11492,7 +11645,6 @@ function Investisseurs(){
                     ? (invZones.reduce((t,z)=>t+(z.sharePercent||0),0)/invZones.length).toFixed(2)
                     : p.sharePct||0;
                   const printFiche=()=>{
-                    const w=window.open("","_blank");
                     const zonesHtml=invZones.length===0
                       ? `<tr><td colspan="4" style="color:#888;text-align:center">Investissement global · ${p.sharePct}%</td></tr>`
                       : invZones.map(z=>{
@@ -11502,7 +11654,7 @@ function Investisseurs(){
                         }).join("");
                     const totalCapital=invZones.reduce((t,z)=>t+(z.capital||0),0)||(p.capital||0);
                     const totalPaid=(db.dividendPayments||[]).filter(d=>d.partnerId===p.id).reduce((t,d)=>t+(d.amount||d.dividend||0),0);
-                    w.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Fiche ${p.name}</title>
+                    const html_=`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Fiche ${p.name}</title>
                     <style>body{font-family:Arial,sans-serif;padding:32px;font-size:13px;color:#222}
                     h1{font-size:20px;margin:0}h2{font-size:14px;margin:16px 0 8px;color:#444;border-bottom:1px solid #eee;padding-bottom:4px}
                     table{width:100%;border-collapse:collapse;margin-bottom:12px}
@@ -11526,8 +11678,12 @@ function Investisseurs(){
                     <table><thead><tr><th>Entité</th><th>Type</th><th>Part (%)</th><th>Capital</th><th>Depuis</th></tr></thead><tbody>${zonesHtml}</tbody></table>
                     ${p.note?`<h2>Note</h2><p>${p.note}</p>`:""}
                     <br><button onclick="window.print()">🖨 Imprimer</button>
-                    </body></html>`);
-                    w.document.close();
+                    </body></html>`;
+                    const _blobF=new Blob([html_],{type:"text/html"});
+                    const _urlF=URL.createObjectURL(_blobF);
+                    const w=window.open(_urlF,"_blank");
+                    if(!w){URL.revokeObjectURL(_urlF);alert("Autorisez les pop-ups.");return;}
+                    setTimeout(()=>URL.revokeObjectURL(_urlF),60000);
                   };
                   return (
                     <tr key={p.id} style={{opacity:p.active===false?.5:1}}>
@@ -12452,8 +12608,7 @@ function BilanFinancier(){
 
           const header=document.body.dataset.printHeader||"GENERATION X";
           const footer=document.body.dataset.printFooter||"Document généré par l'application de gestion";
-          const w=window.open("","_blank");
-          w.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8">
+          const html_c=`<!DOCTYPE html><html><head><meta charset="utf-8">
           <title>Classement des zones — ${periodLabel}</title>
           <style>
             *{box-sizing:border-box}
@@ -12479,8 +12634,12 @@ function BilanFinancier(){
           ${podiumSection("Meilleures filiales","🏗",annData)}
           ${podiumSection("Meilleures succursales","🏬",sucData)}
           <div class="page-footer">${footer}</div>
-          </body></html>`);
-          w.document.close();
+          </body></html>`;
+          const _blobC=new Blob([html_c],{type:"text/html"});
+          const _urlC=URL.createObjectURL(_blobC);
+          const w=window.open(_urlC,"_blank");
+          if(!w){URL.revokeObjectURL(_urlC);alert("Autorisez les pop-ups.");return;}
+          setTimeout(()=>URL.revokeObjectURL(_urlC),60000);
         };
 
         return (
@@ -16688,8 +16847,7 @@ function printFicheEntite({db,type,code,name,sector,active,kpis,details,period})
       <div style="font-size:18px;font-weight:800;color:${k.color||"var(--ok)"}">${k.value}</div>
     </div>`).join("");
   const detailsHtml=details.map(d=>d?`<tr><td style="padding:6px 10px;color:#555;width:40%">${d.label}</td><td style="padding:6px 10px;font-weight:600">${d.value}</td></tr>`:"").join("");
-  const w=window.open("","_blank");
-  w.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Fiche ${type} — ${code}</title>
+  const html_d=`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Fiche ${type} — ${code}</title>
   <style>*{box-sizing:border-box}body{font-family:Arial,sans-serif;padding:28px;font-size:13px;color:#222}
   .header{display:flex;justify-content:space-between;align-items:center;border-bottom:3px solid #4B3FE4;padding-bottom:12px;margin-bottom:20px}
   .logo-box{display:flex;align-items:center;gap:10px}
@@ -16717,8 +16875,12 @@ function printFicheEntite({db,type,code,name,sector,active,kpis,details,period})
   <table>${detailsHtml}</table>
   <div class="footer">${footer}</div>
   <br><div style="text-align:center"><button onclick="window.print()" style="padding:8px 20px;background:#4B3FE4;color:#fff;border:none;border-radius:8px;cursor:pointer">🖨 Imprimer</button></div>
-  </body></html>`);
-  w.document.close();
+  </body></html>`;
+  const _blobD=new Blob([html_d],{type:"text/html"});
+  const _urlD=URL.createObjectURL(_blobD);
+  const w=window.open(_urlD,"_blank");
+  if(!w){URL.revokeObjectURL(_urlD);alert("Autorisez les pop-ups.");return;}
+  setTimeout(()=>URL.revokeObjectURL(_urlD),60000);
 }
 
 function Subsidiaries(){
@@ -17665,8 +17827,6 @@ function Forecast(){
   const prodsOrdered=db.products.filter(p=>prodIds.includes(p.id));
 
   const printForecast=()=>{
-    const win=window.open("","_blank");
-    if(!win){ alert("Veuillez autoriser les fenêtres pop-up pour imprimer."); return; }
     setTimeout(()=>{
     const cols=prodsOrdered.map(p=>`<th class="right" colspan="3" style="border-left:2px solid #fff;padding:7px 6px;">${esc(p.name)}</th>`).join("");
     const subCols=prodsOrdered.map(()=>`<th class="right" style="font-size:8pt;color:#888;border-left:2px solid #ddd;padding:4px 6px;">Prévu</th><th class="right" style="font-size:8pt;color:#fff;background:#4B3FE4;padding:4px 6px;">Stock</th><th class="right" style="font-size:8pt;color:#C2452F;border-right:2px solid #ddd;padding:4px 6px;">À créer</th>`).join("");
@@ -19939,10 +20099,11 @@ table.lig tr.tot td{background:#1A1535;color:#fff;font-weight:800;font-size:9pt;
 </div>
 <`+`script>window.onload=function(){setTimeout(function(){window.print();},400);};<\/script>
 </body></html>`;
-  const win = window.open("", "_blank");
-  if (!win) { alert("Autorisez les pop-ups pour imprimer."); return; }
-  win.document.write(html);
-  win.document.close();
+  const _blobPay=new Blob([html],{type:"text/html"});
+  const _urlPay=URL.createObjectURL(_blobPay);
+  const win=window.open(_urlPay,"_blank");
+  if(!win){URL.revokeObjectURL(_urlPay);alert("Autorisez les pop-ups pour imprimer.");return;}
+  setTimeout(()=>URL.revokeObjectURL(_urlPay),60000);
 }
 
 // ── Composant modal : config salariale d'un employé ────────────────
@@ -21942,8 +22103,7 @@ function GestionSalariale() {
   const imprimerTous = (list) => {
     const bulletinsToPrint = list || filtered;
     // Impression multiple — un par page
-    const win = window.open("","_blank");
-    if (!win) { alert("Autorisez les pop-ups."); return; }
+    // win opened below with blob URL
     const pages = bulletinsToPrint.map(b => {
       const num = `BS-${b.moisKey.replace("-","")}-${b.emp.id.slice(-4).toUpperCase()}`;
       return `<div class="page">
@@ -21977,7 +22137,7 @@ function GestionSalariale() {
         <div class="sig-row"><div class="sig-col"><div class="sig-line"></div><div class="sig-label">L'employé(e)</div></div><div class="sig-col"><div class="sig-line"></div><div class="sig-label">La direction</div></div></div>
       </div>`;
     }).join("");
-    win.document.write(`<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8"><title>Bulletins ${esc(prettyMonth(mois))}</title>
+    const fullHtml=`<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8"><title>Bulletins ${esc(prettyMonth(mois))}</title>
     <style>
     @page{size:A4;margin:13mm;}
     *{box-sizing:border-box;}
@@ -22010,8 +22170,12 @@ function GestionSalariale() {
     <button onclick="window.print()" style="background:#4B3FE4;color:#fff;border:none;padding:9px 20px;border-radius:8px;font-size:13px;cursor:pointer;">⎙ Imprimer / PDF</button>
     </div>
     <`+`script>window.onload=function(){setTimeout(function(){window.print();},400);};<\/script>
-    </body></html>`);
-    win.document.close();
+    </body></html>`;
+    const _blobAll=new Blob([fullHtml],{type:"text/html"});
+    const _urlAll=URL.createObjectURL(_blobAll);
+    const win=window.open(_urlAll,"_blank");
+    if(!win){URL.revokeObjectURL(_urlAll);alert("Autorisez les pop-ups.");return;}
+    setTimeout(()=>URL.revokeObjectURL(_urlAll),60000);
   };
 
   // ── Historique archives ──────────────────────────────────────────────
