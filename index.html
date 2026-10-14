@@ -1110,20 +1110,37 @@ function signatureBlock(labels){
 
 // Ouvre un blob HTML pour impression — compatible Electron Windows + navigateurs web
 function openPrintBlob(html){
-  const blob=new Blob([html],{type:"text/html"});
-  const blobUrl=URL.createObjectURL(blob);
   const isElectron=typeof process!=="undefined"&&process.versions&&process.versions.electron;
   if(isElectron){
-    const iframe=document.createElement("iframe");
-    iframe.style.cssText="position:fixed;top:0;left:0;width:100%;height:100%;border:none;z-index:99999;";
-    iframe.src=blobUrl;
-    document.body.appendChild(iframe);
-    iframe.onload=function(){
-      try{ iframe.contentWindow.focus(); iframe.contentWindow.print(); }catch(e){}
-      setTimeout(()=>{ document.body.removeChild(iframe); URL.revokeObjectURL(blobUrl); },2000);
-    };
-    return null;
+    // Stratégie Electron : écrire dans un fichier temp et ouvrir avec le navigateur par défaut du système
+    try{
+      const {shell}=require("electron");
+      const os=require("os");
+      const fs=require("fs");
+      const path=require("path");
+      const tmpFile=path.join(os.tmpdir(),"genx_print_"+Date.now()+".html");
+      fs.writeFileSync(tmpFile,html,"utf8");
+      shell.openExternal("file:///"+tmpFile.replace(/\\/g,"/"));
+      // Nettoyage du fichier temporaire après 60s
+      setTimeout(()=>{ try{fs.unlinkSync(tmpFile);}catch(e){} },60000);
+      return null;
+    }catch(err){
+      // Fallback iframe si shell/fs non disponible
+      const blob=new Blob([html],{type:"text/html"});
+      const blobUrl=URL.createObjectURL(blob);
+      const iframe=document.createElement("iframe");
+      iframe.style.cssText="position:fixed;top:0;left:0;width:100%;height:100%;border:none;z-index:99999;";
+      iframe.src=blobUrl;
+      document.body.appendChild(iframe);
+      iframe.onload=function(){
+        try{ iframe.contentWindow.focus(); iframe.contentWindow.print(); }catch(e){}
+        setTimeout(()=>{ document.body.removeChild(iframe); URL.revokeObjectURL(blobUrl); },2000);
+      };
+      return null;
+    }
   }
+  const blob=new Blob([html],{type:"text/html"});
+  const blobUrl=URL.createObjectURL(blob);
   const win=window.open(blobUrl,"_blank");
   setTimeout(()=>URL.revokeObjectURL(blobUrl),60000);
   return win;
@@ -1187,25 +1204,12 @@ function printDocument({title,subtitle,scope,period,body,signatures,landscape,wi
     <`+`script>window.onload=function(){setTimeout(function(){window.print();},300);};<\/script>
   </body></html>`;
 
-  // Impression universelle : iframe cachée (compatible Electron Windows + navigateurs)
+  // Electron : déléguer au navigateur par défaut du système via openPrintBlob
+  const isElectron=typeof process!=="undefined"&&process.versions&&process.versions.electron;
+  if(isElectron&&!preWin){ openPrintBlob(html); return; }
+  // Navigateur web / Android : window.open normal
   const blob=new Blob([html],{type:"text/html"});
   const blobUrl=URL.createObjectURL(blob);
-  // Tenter d'abord window.open (navigateurs web + Android)
-  if(!preWin){
-    const isElectron=typeof process!=="undefined"&&process.versions&&process.versions.electron;
-    if(isElectron){
-      // Electron : iframe cachée injectée dans le DOM courant
-      const iframe=document.createElement("iframe");
-      iframe.style.cssText="position:fixed;top:0;left:0;width:100%;height:100%;border:none;z-index:99999;";
-      iframe.src=blobUrl;
-      document.body.appendChild(iframe);
-      iframe.onload=function(){
-        try{ iframe.contentWindow.focus(); iframe.contentWindow.print(); }catch(e){}
-        setTimeout(()=>{ document.body.removeChild(iframe); URL.revokeObjectURL(blobUrl); },2000);
-      };
-      return;
-    }
-  }
   const win=preWin||window.open(blobUrl,"_blank");
   if(!win){ URL.revokeObjectURL(blobUrl); alert("Veuillez autoriser les fenêtres pop-up pour imprimer."); return; }
   setTimeout(()=>URL.revokeObjectURL(blobUrl), 60000);
@@ -2169,12 +2173,15 @@ function computeBalances(db){
   (db.expenses||[]).forEach(e=>{
     if(e.level==="holding") addC("holding",null,-(e.amount||0));
     else if(e.annexeId){
-      // Résoudre : annexeId peut être un suc-ID legacy → remonter à l'annexe parente
-      const resolvedAnnexeId=resolveToAnnexeId(db,e.annexeId);
-      addC("annexe",resolvedAnnexeId,-(e.amount||0));
+      // e.annexeId peut être un vrai annexe-ID ou un suc-ID (succursale).
+      // Dans les deux cas on débite la clé "annexe:<id>" telle quelle :
+      // - pour une filiale : clé "annexe:anx_xxx" → caisse de la filiale
+      // - pour une succursale : clé "annexe:suc_xxx" → caisse de la succursale
+      // On ne remonte PLUS à la filiale parente via resolveToAnnexeId.
+      addC("annexe",e.annexeId,-(e.amount||0));
     }
     // Fallback : dépense sauvegardée avec level="succursale" (ancien schéma)
-    else if(e.level==="succursale"&&e.succursaleId) addC("annexe",resolveToAnnexeId(db,e.succursaleId),-(e.amount||0));
+    else if(e.level==="succursale"&&e.succursaleId) addC("annexe",e.succursaleId,-(e.amount||0));
     else if(e.subsidiaryId) addC("subsidiary",e.subsidiaryId,-(e.amount||0));
   });
   // 3) Mouvements de caisse (remontées / injections) entre caisses
