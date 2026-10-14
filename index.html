@@ -1108,37 +1108,14 @@ function signatureBlock(labels){
   return `<div class="sig-row">${cols}</div>`;
 }
 
-// Ouvre un blob HTML pour impression — compatible Electron Windows + navigateurs web
+// Ouvre un blob HTML pour impression — compatible Electron Windows (IPC) + navigateurs web
 function openPrintBlob(html){
-  const isElectron=typeof process!=="undefined"&&process.versions&&process.versions.electron;
-  if(isElectron){
-    // Stratégie Electron : écrire dans un fichier temp et ouvrir avec le navigateur par défaut du système
-    try{
-      const {shell}=require("electron");
-      const os=require("os");
-      const fs=require("fs");
-      const path=require("path");
-      const tmpFile=path.join(os.tmpdir(),"genx_print_"+Date.now()+".html");
-      fs.writeFileSync(tmpFile,html,"utf8");
-      shell.openExternal("file:///"+tmpFile.replace(/\\/g,"/"));
-      // Nettoyage du fichier temporaire après 60s
-      setTimeout(()=>{ try{fs.unlinkSync(tmpFile);}catch(e){} },60000);
-      return null;
-    }catch(err){
-      // Fallback iframe si shell/fs non disponible
-      const blob=new Blob([html],{type:"text/html"});
-      const blobUrl=URL.createObjectURL(blob);
-      const iframe=document.createElement("iframe");
-      iframe.style.cssText="position:fixed;top:0;left:0;width:100%;height:100%;border:none;z-index:99999;";
-      iframe.src=blobUrl;
-      document.body.appendChild(iframe);
-      iframe.onload=function(){
-        try{ iframe.contentWindow.focus(); iframe.contentWindow.print(); }catch(e){}
-        setTimeout(()=>{ document.body.removeChild(iframe); URL.revokeObjectURL(blobUrl); },2000);
-      };
-      return null;
-    }
+  // Electron avec contextIsolation : utiliser l'API IPC exposée par preload.js
+  if(window.electronAPI && typeof window.electronAPI.printHTML === "function"){
+    window.electronAPI.printHTML(html);
+    return null;
   }
+  // Navigateur web / Android : window.open normal
   const blob=new Blob([html],{type:"text/html"});
   const blobUrl=URL.createObjectURL(blob);
   const win=window.open(blobUrl,"_blank");
@@ -1204,9 +1181,8 @@ function printDocument({title,subtitle,scope,period,body,signatures,landscape,wi
     <`+`script>window.onload=function(){setTimeout(function(){window.print();},300);};<\/script>
   </body></html>`;
 
-  // Electron : déléguer au navigateur par défaut du système via openPrintBlob
-  const isElectron=typeof process!=="undefined"&&process.versions&&process.versions.electron;
-  if(isElectron&&!preWin){ openPrintBlob(html); return; }
+  // Electron (contextIsolation) : déléguer via IPC → navigateur par défaut
+  if(window.electronAPI&&typeof window.electronAPI.printHTML==="function"&&!preWin){ openPrintBlob(html); return; }
   // Navigateur web / Android : window.open normal
   const blob=new Blob([html],{type:"text/html"});
   const blobUrl=URL.createObjectURL(blob);
