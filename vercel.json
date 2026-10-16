@@ -1,7 +1,8 @@
 {
   "functions": {
     "api/send-sms.js": {
-      "runtime": "edge"
+      "memory": 128,
+      "maxDuration": 10
     }
   }
 }
