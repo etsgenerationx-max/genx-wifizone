@@ -1800,9 +1800,6 @@ function Login(){
         <button className="btn" style={{width:"100%",justifyContent:"center",marginTop:18,padding:"12px"}} onClick={tryLogin} disabled={busy}>
           {busy?"Connexion…":"Se connecter →"}
         </button>
-        <p className="help" style={{marginTop:16,textAlign:"center"}}>
-          Version de démonstration. La sécurité réelle des mots de passe sera assurée lors de la mise en ligne.
-        </p>
       </div>
     </div>
   );
@@ -11292,7 +11289,52 @@ function Investisseurs(){
   const [divGran,setDivGran]=useState("month");
   const [divDate,setDivDate]=useState(today());
   const [divDateTo,setDivDateTo]=useState(today());
-  const partners=(db.partners||[]).filter(p=>p.active!==false);
+  // Filtre partenaires selon le périmètre nav
+  // Un partenaire est visible si au moins une de ses zones d'investissement est dans le scope nav
+  const inNavPartner=(p)=>{
+    if(nav.level==="holding") return true;
+    const invZones=p.investments||[];
+    // Partenaire sans zones = investisseur global (holding seulement)
+    if(invZones.length===0) return false;
+    return invZones.some(z=>{
+      if(nav.level==="subsidiary"){
+        // Visible si la zone est : ce subsidiary, ou une annexe/succursale de ce subsidiary
+        if(z.entityLevel==="subsidiary") return z.entityId===nav.id;
+        if(z.entityLevel==="annexe"){
+          const anx=(db.annexes||[]).find(a=>a.id===z.entityId);
+          if(anx) return anx.subsidiaryId===nav.id;
+          const suc=(db.succursales||[]).find(s=>s.id===z.entityId);
+          if(suc){const parentAnx=(db.annexes||[]).find(a=>a.id===suc.annexeId);return parentAnx?.subsidiaryId===nav.id;}
+        }
+        if(z.entityLevel==="succursale"){
+          const suc=(db.succursales||[]).find(s=>s.id===z.entityId);
+          const parentAnx=suc?(db.annexes||[]).find(a=>a.id===suc.annexeId):null;
+          return parentAnx?.subsidiaryId===nav.id;
+        }
+        return false;
+      }
+      if(nav.level==="annexe"){
+        // Visible si la zone est : cette annexe ou une de ses succursales
+        if(z.entityLevel==="annexe") return z.entityId===nav.id;
+        if(z.entityLevel==="succursale"){
+          const suc=(db.succursales||[]).find(s=>s.id===z.entityId);
+          return suc?.annexeId===nav.id;
+        }
+        return false;
+      }
+      if(nav.level==="succursale"){
+        // Visible si la zone est exactement cette succursale, ou l'annexe parente
+        if(z.entityLevel==="annexe"){
+          const suc=(db.succursales||[]).find(s=>s.id===nav.id);
+          return suc?.annexeId===z.entityId;
+        }
+        if(z.entityLevel==="succursale") return z.entityId===nav.id;
+        return false;
+      }
+      return false;
+    });
+  };
+  const partners=(db.partners||[]).filter(p=>p.active!==false&&inNavPartner(p));
   const totalShares=partners.reduce((s,p)=>s+(Number(p.sharePct)||0),0);
 
   // Mois pour calcul dividendes = mois de divDate
@@ -11474,7 +11516,10 @@ function Investisseurs(){
     .sort((a,b)=>(b.date||"").localeCompare(a.date||""));
   const totalFilteredRevenue=filteredRevenues.reduce((s,r)=>s+(Number(r.amount)||0),0);
 
+  // IDs des partenaires visibles dans le périmètre nav courant
+  const _partnerIdsInScope=new Set(partners.map(p=>p.id));
   const filteredHistory=(db.dividendPayments||[])
+    .filter(d=>nav.level==="holding"||_partnerIdsInScope.has(d.partnerId))
     .filter(d=>inPeriodDate(d.month+"-01",histGran,histDate,histDateTo))
     .filter(d=>!histPartner||d.partnerId===histPartner)
     .filter(d=>{ if(!histQ.trim()) return true; const p=(db.partners||[]).find(x=>x.id===d.partnerId); return (`${p?.name||""} ${d.ref||""} ${d.paidByName||""}`).toLowerCase().includes(histQ.toLowerCase()); })
@@ -11667,8 +11712,25 @@ function Investisseurs(){
     printDividend(p,Math.round(dividend),ref);
   };
 
+  // Label périmètre courant
+  const _navScopeLabel=(()=>{
+    if(nav.level==="holding") return null;
+    if(nav.level==="subsidiary"){const s=(db.subsidiaries||[]).find(x=>x.id===nav.id);return s?`Groupe : ${s.code||s.name}`:null;}
+    if(nav.level==="annexe"){const a=(db.annexes||[]).find(x=>x.id===nav.id);return a?`Filiale : ${a.code||a.name}`:null;}
+    if(nav.level==="succursale"){const s=(db.succursales||[]).find(x=>x.id===nav.id);return s?`Succursale : ${s.code||s.name}`:null;}
+    return null;
+  })();
+
   return (
     <div className="grid" style={{gap:16}}>
+      {/* Badge périmètre nav */}
+      {_navScopeLabel&&(
+        <div style={{display:"flex",alignItems:"center",gap:8,background:"var(--bg2)",borderRadius:10,padding:"8px 14px",fontSize:13}}>
+          <span style={{color:"var(--brand)",fontWeight:700}}>📍 Périmètre</span>
+          <span style={{fontWeight:600}}>{_navScopeLabel}</span>
+          <span className="muted" style={{fontSize:12}}>— seuls les partenaires investis dans ce périmètre sont affichés</span>
+        </div>
+      )}
       {/* Onglets */}
       <div style={{display:"flex",gap:0,borderBottom:"2px solid var(--line)"}}>
         {[
@@ -11699,8 +11761,8 @@ function Investisseurs(){
             <table>
               <thead><tr><th>Partenaire</th><th>Téléphone</th><th>Email</th><th className="right">Part (%)</th><th>Entrée</th><th>Note</th>{canManagePartner&&<th></th>}</tr></thead>
               <tbody>
-                {(db.partners||[]).length===0&&<tr><td colSpan="7" className="muted" style={{textAlign:"center",padding:20}}>Aucun partenaire. Ajoutez le premier.</td></tr>}
-                {(db.partners||[]).map(p=>{
+                {partners.length===0&&<tr><td colSpan="7" className="muted" style={{textAlign:"center",padding:20}}>{(db.partners||[]).filter(p=>p.active!==false).length===0?"Aucun partenaire. Ajoutez le premier.":"Aucun partenaire avec une zone d'investissement dans ce périmètre."}</td></tr>}
+                {partners.map(p=>{
                   const invZones=p.investments||[];
                   const avgPct=invZones.length>0
                     ? (invZones.reduce((t,z)=>t+(z.sharePercent||0),0)/invZones.length).toFixed(2)
@@ -12004,7 +12066,7 @@ function Investisseurs(){
               style={{padding:"7px 10px",borderRadius:9,border:"1px solid var(--line)",fontSize:13,flex:"1 1 150px"}}/>
             <select value={histPartner} onChange={e=>setHistPartner(e.target.value)} style={{padding:"7px 8px",borderRadius:9,border:"1px solid var(--line)",fontSize:13}}>
               <option value="">Tous les partenaires</option>
-              {(db.partners||[]).map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
+              {partners.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
             </select>
             {(histQ||histPartner)&&<button className="btn sm ghost" onClick={()=>{setHistQ("");setHistPartner("");}}>✕</button>}
             <span className="muted" style={{fontSize:12}}>{filteredHistory.length} paiement(s)</span>
