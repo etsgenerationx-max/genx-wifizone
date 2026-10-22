@@ -11908,7 +11908,7 @@ function Investisseurs(){
               <span className="muted" style={{fontSize:12,whiteSpace:"nowrap"}}>{filteredRevenues.length} entrée(s)</span>
               <b style={{color:"var(--brand)",whiteSpace:"nowrap"}}>{fcfa(totalFilteredRevenue)}</b>
               {canManageRevenue&&<button className="btn" onClick={()=>setAddRevenue(true)}><Kb k="N"/>+ Saisir</button>}
-              {canManageRevenue&&(()=>{const wifiAnnexes=(db.annexes||[]).filter(a=>a.mikrotikHost&&a.mikrotikUser);return wifiAnnexes.length>0&&<button className="btn" style={{background:"#15803d",color:"#fff"}} onClick={()=>setShowMikrotikImport(true)}>📡 Import MikroTik</button>;})()}
+              {canManageRevenue&&(()=>{const wifiSucs=(db.succursales||[]).filter(s=>s.mikrotikHost&&s.mikrotikUser);return wifiSucs.length>0&&<button className="btn" style={{background:"#15803d",color:"#fff"}} onClick={()=>setShowMikrotikImport(true)}>📡 Import MikroTik</button>;})()}
             </div>
           </div>
           <div className="card" style={{overflowX:"auto"}}>
@@ -12884,8 +12884,8 @@ function MikrotikImportModal({defaultMonth,onClose}){
   const {db,mutate,user}=useApp();
   // Mois au format YYYY-MM pour le sélecteur
   const [selMonth,setSelMonth]=useState(defaultMonth||today().slice(0,7));
-  // Filiale sélectionnée (parmi celles configurées MikroTik)
-  const wifiAnnexes=(db.annexes||[]).filter(a=>a.mikrotikHost&&a.mikrotikUser&&a.active!==false);
+  // Succursale sélectionnée (parmi celles configurées MikroTik)
+  const wifiAnnexes=(db.succursales||[]).filter(s=>s.mikrotikHost&&s.mikrotikUser&&s.active!==false);
   const [selAnnexeId,setSelAnnexeId]=useState(wifiAnnexes[0]?.id||"");
   const [loading,setLoading]=useState(false);
   const [result,setResult]=useState(null); // {byDay:[{date,count,total}], sales:[...]}
@@ -12917,7 +12917,7 @@ function MikrotikImportModal({defaultMonth,onClose}){
         amount:d.total,
         count:d.count,
         annexeId:selAnnexeId,
-        annexeName:annexe?.name||annexe?.code||"",
+        annexeName:annexe?.name||annexe?.code||annexe?.id||"",
         alreadyExists:existingRevDates.has(d.date),
         skip:existingRevDates.has(d.date), // auto-skip si déjà importé
       })));
@@ -13043,8 +13043,8 @@ function MikrotikImportModal({defaultMonth,onClose}){
 
         {wifiAnnexes.length===0&&(
           <div style={{background:"#fef3c7",border:"1px solid #fbbf24",borderRadius:8,padding:"12px 14px",fontSize:13,color:"#92400e"}}>
-            ⚠️ Aucune filiale n'a de configuration MikroTik. <br/>
-            Allez dans <b>Paramètres → Filiales</b>, modifiez une filiale WiFi et renseignez l'hôte, le port et les identifiants RouterOS.
+            ⚠️ Aucune succursale n'a de configuration MikroTik. <br/>
+            Allez dans <b>Paramètres → Succursales</b>, modifiez une zone WiFi et renseignez l'hôte, le port et les identifiants RouterOS.
           </div>
         )}
       </div>
@@ -16966,6 +16966,19 @@ function SurcursaleModal({suc,onClose}){
         </Field>
         <Field label="Note"><input value={f.note||""} onChange={e=>setF({...f,note:e.target.value})}/></Field>
         {suc&&<Field label="Statut"><select value={f.active?"1":"0"} onChange={e=>setF({...f,active:e.target.value==="1"})}><option value="1">Active</option><option value="0">Inactive</option></select></Field>}
+        {/* ── Configuration MikroTik ── */}
+        <div style={{marginTop:4,padding:"12px 14px",background:"#f0fdf4",borderRadius:10,border:"1px solid #86efac"}}>
+          <div style={{fontWeight:700,fontSize:13,color:"#15803d",marginBottom:4}}>📡 Configuration MikroTik (facultatif)</div>
+          <p style={{fontSize:12,color:"#16a34a",margin:"0 0 10px"}}>Permet l'import automatique des ventes depuis le routeur MikroTik de cette zone WiFi. Les identifiants sont stockés de façon sécurisée dans la base de données.</p>
+          <div className="row">
+            <div style={{flex:3}}><Field label="Hôte RouterOS" hint="Ex: v12.mikroot.com"><input value={f.mikrotikHost||""} onChange={e=>setF({...f,mikrotikHost:e.target.value.trim()})} placeholder="Ex: v12.mikroot.com"/></Field></div>
+            <div style={{flex:1}}><Field label="Port" hint="Défaut: 8728"><input type="number" value={f.mikrotikPort||8728} onChange={e=>setF({...f,mikrotikPort:Number(e.target.value)})} placeholder="8728"/></Field></div>
+          </div>
+          <div className="row">
+            <div style={{flex:1}}><Field label="Identifiant RouterOS"><input value={f.mikrotikUser||""} onChange={e=>setF({...f,mikrotikUser:e.target.value.trim()})} placeholder="admin"/></Field></div>
+            <div style={{flex:1}}><Field label="Mot de passe RouterOS"><input type="password" value={f.mikrotikPassword||""} onChange={e=>setF({...f,mikrotikPassword:e.target.value})} placeholder="••••••••" autoComplete="new-password"/></Field></div>
+          </div>
+        </div>
         {suc&&blockers.length>0&&(
           <div style={{background:"#fdf3e3",borderLeft:"4px solid var(--accent)",borderRadius:"0 8px 8px 0",padding:"10px 12px",fontSize:12.5}}>
             <b style={{color:"#c0641f"}}>Suppression impossible :</b> cette succursale contient {blockers.map(([l,n])=>`${n} ${l}`).join(", ")}. Réaffectez-les d'abord ou passez la succursale en <b>Inactive</b>.
@@ -17089,19 +17102,6 @@ function AnnexeModal({annexe,onClose}){
       </Field>
       <Field label="Date de création"><input type="date" value={f.createdAt} onChange={e=>setF({...f,createdAt:e.target.value})}/></Field>
       {annexe && <Field label="Statut"><select value={f.active?"1":"0"} onChange={e=>setF({...f,active:e.target.value==="1"})}><option value="1">Active</option><option value="0">Inactive</option></select></Field>}
-      {/* ── Configuration MikroTik ── */}
-      <div style={{marginTop:12,padding:"12px 14px",background:"#f0fdf4",borderRadius:10,border:"1px solid #86efac"}}>
-        <div style={{fontWeight:700,fontSize:13,color:"#15803d",marginBottom:4}}>📡 Configuration MikroTik (facultatif)</div>
-        <p style={{fontSize:12,color:"#16a34a",margin:"0 0 10px"}}>Permet l'import automatique des ventes depuis le routeur MikroTik de cette filiale WiFi. Les identifiants sont stockés de façon sécurisée dans la base de données.</p>
-        <div className="row">
-          <div style={{flex:3}}><Field label="Hôte RouterOS" hint="Ex: v12.mikroot.com"><input value={f.mikrotikHost||""} onChange={e=>setF({...f,mikrotikHost:e.target.value.trim()})} placeholder="Ex: v12.mikroot.com"/></Field></div>
-          <div style={{flex:1}}><Field label="Port" hint="Défaut: 8728"><input type="number" value={f.mikrotikPort||8728} onChange={e=>setF({...f,mikrotikPort:Number(e.target.value)})} placeholder="8728"/></Field></div>
-        </div>
-        <div className="row">
-          <div style={{flex:1}}><Field label="Identifiant RouterOS"><input value={f.mikrotikUser||""} onChange={e=>setF({...f,mikrotikUser:e.target.value.trim()})} placeholder="admin"/></Field></div>
-          <div style={{flex:1}}><Field label="Mot de passe RouterOS"><input type="password" value={f.mikrotikPassword||""} onChange={e=>setF({...f,mikrotikPassword:e.target.value})} placeholder="••••••••" autoComplete="new-password"/></Field></div>
-        </div>
-      </div>
       {/* ── Notifications Telegram propres à cette filiale ── */}
       <div style={{marginTop:12,padding:"12px 14px",background:"#eff6ff",borderRadius:10,border:"1px solid #bfdbfe"}}>
         <div style={{fontWeight:700,fontSize:13,color:"#1e40af",marginBottom:8}}>🤖 Notifications Telegram — cette filiale</div>
