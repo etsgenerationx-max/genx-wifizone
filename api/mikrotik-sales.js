@@ -41,9 +41,21 @@ export default async function handler(req, res) {
   }
 
   // 2. Connexion RouterOS API
+  // Extraire le port si inclus dans l'hôte (ex: "v10.mikroot.com:3884")
+  let mikHost = annexe.mikrotik_host.trim();
+  let mikPort = annexe.mikrotik_port || 8728;
+  if (mikHost.includes(':')) {
+    const parts = mikHost.split(':');
+    const portFromHost = parseInt(parts[1], 10);
+    if (!isNaN(portFromHost)) {
+      mikHost = parts[0];
+      mikPort = portFromHost;  // priorité au port dans l'hôte
+    }
+  }
+
   const conn = new RouterOSAPI({
-    host:     annexe.mikrotik_host,
-    port:     annexe.mikrotik_port || 8728,
+    host:     mikHost,
+    port:     mikPort,
     user:     annexe.mikrotik_user,
     password: annexe.mikrotik_password || '',
     timeout:  8000,  // 8s timeout (Vercel limit 10s)
