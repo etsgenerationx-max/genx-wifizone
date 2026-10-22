@@ -58,7 +58,7 @@ export default async function handler(req, res) {
     port:     mikPort,
     user:     annexe.mikrotik_user,
     password: annexe.mikrotik_password || '',
-    timeout:  8000,  // 8s timeout (Vercel limit 10s)
+    timeout:  25000, // 25s — récupération de tous les scripts mikhmon
     keepalive: false,
   });
 
@@ -66,21 +66,15 @@ export default async function handler(req, res) {
   try {
     await conn.connect();
 
-    // 3. Construire le filtre
-    const channel = conn.openChannel();
-    let params = {};
-    if (month) {
-      params['?owner'] = month;          // "102026"
-    } else if (day) {
-      params['?source'] = day;           // "2026-10-15"
-    } else {
-      params['?comment'] = 'mikhmon';    // toutes les ventes
-    }
-
-    const rawItems = await conn.write('/system/script/print', params);
+    // 3. Récupérer tous les scripts mikhmon (le filtre RouterOS sur owner/source n'est pas fiable)
+    // On filtre côté Node.js après réception
+    const rawItems = await conn.write('/system/script/print', { '?comment': 'mikhmon' });
     await conn.close();
 
     // 4. Parser le champ name: "date-|-time-|-user-|-price-|-...-|-...-|-...-|-profile-|-comment"
+    // Format date dans le name: "YYYY-MM-DD" (parts[0])
+    // owner du script: "MMYYYY" ex: "102026"
+    // source du script: "YYYY-MM-DD" ex: "2026-10-15"
     for (const item of rawItems) {
       const name = item.name || '';
       if (!name.includes('-|-')) continue;  // pas une vente mikhmon
@@ -91,15 +85,31 @@ export default async function handler(req, res) {
       const price = parseInt(parts[3], 10);
       if (isNaN(price)) continue;
 
+      const saleDate = parts[0] || item.source || '';  // "YYYY-MM-DD"
+
+      // Filtre côté Node.js — plus fiable que le filtre RouterOS
+      if (month) {
+        // month = "MMYYYY" ex: "102026" → on compare avec owner du script
+        // OU on compare la date: saleDate.slice(0,7) === "2026-10"
+        const scriptOwner = item.owner || '';
+        const saleDateYM  = saleDate.length >= 7 ? saleDate.slice(0, 7) : ''; // "2026-10"
+        // Reconstruire "MMYYYY" depuis la date pour comparaison robuste
+        const saleMM = saleDateYM ? saleDateYM.slice(5, 7).replace(/^0/, '') + saleDateYM.slice(0, 4) : '';
+        if (scriptOwner !== month && saleMM !== month) continue;
+      } else if (day) {
+        // day = "YYYY-MM-DD"
+        if (saleDate !== day && item.source !== day) continue;
+      }
+
       sales.push({
-        date:     parts[0] || item.source || '',   // "YYYY-MM-DD"
+        date:     saleDate,
         time:     parts[1] || '',
         username: parts[2] || '',
         price:    price,
         profile:  parts[7] || '',
         comment:  parts[8] || '',
-        month:    item.owner  || '',               // "MMYYYY"
-        day:      item.source || '',               // "YYYY-MM-DD"
+        month:    item.owner  || '',
+        day:      item.source || '',
       });
     }
 
@@ -130,5 +140,6 @@ export default async function handler(req, res) {
 }
 
 export const config = {
-  api: { bodyParser: false }
+  api:     { bodyParser: false },
+  maxDuration: 30,  // Vercel: max 30s pour les fonctions hobby/pro
 };
