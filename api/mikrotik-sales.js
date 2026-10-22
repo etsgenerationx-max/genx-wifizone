@@ -26,17 +26,18 @@ export default async function handler(req, res) {
   }
 
   // 1. Lire les credentials MikroTik depuis Supabase
+  // Lire depuis la table succursales (chaque succursale = une zone avec son propre routeur)
   const { data: annexe, error: dbErr } = await supabase
-    .from('annexes')
-    .select('id, name, mikrotik_host, mikrotik_port, mikrotik_user, mikrotik_password')
+    .from('succursales')
+    .select('id, name, code, mikrotik_host, mikrotik_port, mikrotik_user, mikrotik_password')
     .eq('id', annexe_id)
     .single();
 
   if (dbErr || !annexe) {
-    return res.status(404).json({ error: 'Annexe introuvable', detail: dbErr?.message });
+    return res.status(404).json({ error: 'Succursale introuvable', detail: dbErr?.message });
   }
   if (!annexe.mikrotik_host || !annexe.mikrotik_user) {
-    return res.status(400).json({ error: 'MikroTik non configuré pour cette annexe' });
+    return res.status(400).json({ error: 'MikroTik non configuré pour cette succursale' });
   }
 
   // 2. Connexion RouterOS API
