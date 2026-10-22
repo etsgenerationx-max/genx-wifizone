@@ -30,15 +30,27 @@ export default async function handler(req, res) {
     return res.status(400).json({ ok: false, msg: 'Body JSON invalide' });
   }
 
-  const { host, port, user, password } = body;
+  let { host, port, user, password } = body;
 
   if (!host || !user) {
     return res.status(400).json({ ok: false, msg: 'Hôte et identifiant requis' });
   }
 
+  // Extraire le port si inclus dans l'hôte (ex: "v10.mikroot.com:3884")
+  host = host.trim();
+  if (host.includes(':')) {
+    const parts = host.split(':');
+    const portFromHost = parseInt(parts[1], 10);
+    if (!isNaN(portFromHost)) {
+      host = parts[0];
+      port = portFromHost;  // priorité au port dans l'hôte
+    }
+  }
+  const resolvedPort = Number(port) || 8728;
+
   const conn = new RouterOSAPI({
-    host:      host.trim(),
-    port:      Number(port) || 8728,
+    host:      host,
+    port:      resolvedPort,
     user:      user.trim(),
     password:  password || '',
     timeout:   8000,
@@ -65,7 +77,7 @@ export default async function handler(req, res) {
     const msg = err.message || '';
     let friendly = 'Connexion échouée';
 
-    if (msg.includes('ECONNREFUSED'))  friendly = `Port ${port || 8728} refusé sur ${host}`;
+    if (msg.includes('ECONNREFUSED'))  friendly = `Port ${resolvedPort} refusé sur ${host}`;
     else if (msg.includes('ETIMEDOUT') || msg.includes('timeout')) friendly = `Délai dépassé — hôte injoignable : ${host}`;
     else if (msg.includes('ENOTFOUND')) friendly = `Hôte introuvable : ${host}`;
     else if (msg.includes('wrong credentials') || msg.includes('invalid user') || msg.includes('login failure')) friendly = 'Identifiant ou mot de passe incorrect';
