@@ -16997,8 +16997,8 @@ function SurcursaleModal({suc,onClose}){
           <div style={{fontWeight:700,fontSize:13,color:"#15803d",marginBottom:4}}>📡 Configuration MikroTik (facultatif)</div>
           <p style={{fontSize:12,color:"#16a34a",margin:"0 0 10px"}}>Permet l'import automatique des ventes depuis le routeur MikroTik de cette zone WiFi. Les identifiants sont stockés de façon sécurisée dans la base de données.</p>
           <div className="row">
-            <div style={{flex:3}}><Field label="Hôte RouterOS" hint="Ex: v12.mikroot.com"><input value={f.mikrotikHost||""} onChange={e=>{setF({...f,mikrotikHost:e.target.value.trim()});setPingState(null);}} placeholder="Ex: v12.mikroot.com"/></Field></div>
-            <div style={{flex:1}}><Field label="Port" hint="Défaut: 8728"><input type="number" value={f.mikrotikPort||8728} onChange={e=>{setF({...f,mikrotikPort:Number(e.target.value)});setPingState(null);}} placeholder="8728"/></Field></div>
+            <div style={{flex:3}}><Field label="Hôte RouterOS" hint="Ex: v10.mikroot.com:3884 (port inclus) ou v12.mikroot.com"><input value={f.mikrotikHost||""} onChange={e=>{setF({...f,mikrotikHost:e.target.value.trim()});setPingState(null);}} placeholder="Ex: v10.mikroot.com:3884"/></Field></div>
+            <div style={{flex:1}}><Field label="Port" hint="Ignoré si port dans l'hôte"><input type="number" value={f.mikrotikPort||8728} onChange={e=>{setF({...f,mikrotikPort:Number(e.target.value)});setPingState(null);}} placeholder="8728"/></Field></div>
           </div>
           <div className="row">
             <div style={{flex:1}}><Field label="Identifiant RouterOS"><input value={f.mikrotikUser||""} onChange={e=>{setF({...f,mikrotikUser:e.target.value.trim()});setPingState(null);}} placeholder="admin"/></Field></div>
