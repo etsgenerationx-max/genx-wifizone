@@ -12905,9 +12905,11 @@ function MikrotikImportModal({defaultMonth,onClose}){
     try{
       const params=new URLSearchParams({annexe_id:selAnnexeId,month:toMikrotikMonth(selMonth)});
       const resp=await fetch(`/api/mikrotik-sales?${params}`);
-      if(!resp.ok){const t=await resp.text();throw new Error(t);}
-      const data=await resp.json();
-      if(!data.ok)throw new Error(data.error||"Erreur API");
+      const data=await resp.json().catch(()=>null);
+      if(!resp.ok||!data?.ok){
+        const msg=data?.detail?`${data.error}: ${data.detail}`:data?.error||"Erreur connexion MikroTik";
+        throw new Error(msg);
+      }
       setResult(data);
       // Préparer la prévisualisation: une ligne par jour avec recette totale
       const annexe=wifiAnnexes.find(a=>a.id===selAnnexeId);
@@ -12971,7 +12973,7 @@ function MikrotikImportModal({defaultMonth,onClose}){
         {/* Sélection filiale + mois */}
         <div className="row" style={{gap:10}}>
           <div style={{flex:2}}>
-            <Field label="Filiale WiFi">
+            <Field label="Succursale WiFi">
               <select value={selAnnexeId} onChange={e=>{setSelAnnexeId(e.target.value);setResult(null);setPreview([]);setErr("");}}>
                 {wifiAnnexes.map(a=><option key={a.id} value={a.id}>{a.code||a.name} — {a.mikrotikHost}</option>)}
               </select>
@@ -16901,6 +16903,30 @@ function Succursales(){
 }
 
 function SurcursaleModal({suc,onClose}){
+  // ── Test ping MikroTik ──
+  const [pingState,setPingState]=useState(null); // null | "loading" | {ok,msg}
+  const testMikrotik=async()=>{
+    setPingState("loading");
+    try{
+      // On utilise la même API avec un paramètre spécial ?ping=1 (ou on simule en cherchant le mois courant)
+      // Comme la succursale n'est pas encore sauvegardée on passe les credentials inline via POST
+      const resp=await fetch("/api/mikrotik-ping",{
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({
+          host:f.mikrotikHost,
+          port:f.mikrotikPort||8728,
+          user:f.mikrotikUser,
+          password:f.mikrotikPassword||"",
+        }),
+      });
+      const data=await resp.json().catch(()=>({ok:false,msg:"Réponse invalide"}));
+      setPingState({ok:data.ok===true,msg:data.msg||data.error||(data.ok?"Connexion réussie":"Échec")});
+    }catch(e){
+      setPingState({ok:false,msg:e.message||"Erreur réseau"});
+    }
+  };
+  // reset ping si les champs changent
   const {db,mutate,nav,scopedAnnexeIds}=useApp();
   // Déterminer la filiale pré-sélectionnée selon le périmètre nav
   const navAnnexeId = nav.level==="annexe" ? nav.id : (suc?.annexeId||"");
@@ -16971,13 +16997,35 @@ function SurcursaleModal({suc,onClose}){
           <div style={{fontWeight:700,fontSize:13,color:"#15803d",marginBottom:4}}>📡 Configuration MikroTik (facultatif)</div>
           <p style={{fontSize:12,color:"#16a34a",margin:"0 0 10px"}}>Permet l'import automatique des ventes depuis le routeur MikroTik de cette zone WiFi. Les identifiants sont stockés de façon sécurisée dans la base de données.</p>
           <div className="row">
-            <div style={{flex:3}}><Field label="Hôte RouterOS" hint="Ex: v12.mikroot.com"><input value={f.mikrotikHost||""} onChange={e=>setF({...f,mikrotikHost:e.target.value.trim()})} placeholder="Ex: v12.mikroot.com"/></Field></div>
-            <div style={{flex:1}}><Field label="Port" hint="Défaut: 8728"><input type="number" value={f.mikrotikPort||8728} onChange={e=>setF({...f,mikrotikPort:Number(e.target.value)})} placeholder="8728"/></Field></div>
+            <div style={{flex:3}}><Field label="Hôte RouterOS" hint="Ex: v12.mikroot.com"><input value={f.mikrotikHost||""} onChange={e=>{setF({...f,mikrotikHost:e.target.value.trim()});setPingState(null);}} placeholder="Ex: v12.mikroot.com"/></Field></div>
+            <div style={{flex:1}}><Field label="Port" hint="Défaut: 8728"><input type="number" value={f.mikrotikPort||8728} onChange={e=>{setF({...f,mikrotikPort:Number(e.target.value)});setPingState(null);}} placeholder="8728"/></Field></div>
           </div>
           <div className="row">
-            <div style={{flex:1}}><Field label="Identifiant RouterOS"><input value={f.mikrotikUser||""} onChange={e=>setF({...f,mikrotikUser:e.target.value.trim()})} placeholder="admin"/></Field></div>
-            <div style={{flex:1}}><Field label="Mot de passe RouterOS"><input type="password" value={f.mikrotikPassword||""} onChange={e=>setF({...f,mikrotikPassword:e.target.value})} placeholder="••••••••" autoComplete="new-password"/></Field></div>
+            <div style={{flex:1}}><Field label="Identifiant RouterOS"><input value={f.mikrotikUser||""} onChange={e=>{setF({...f,mikrotikUser:e.target.value.trim()});setPingState(null);}} placeholder="admin"/></Field></div>
+            <div style={{flex:1}}><Field label="Mot de passe RouterOS"><input type="password" value={f.mikrotikPassword||""} onChange={e=>{setF({...f,mikrotikPassword:e.target.value});setPingState(null);}} placeholder="••••••••" autoComplete="new-password"/></Field></div>
           </div>
+          {/* Bouton test connexion */}
+          {(f.mikrotikHost&&f.mikrotikUser)&&(
+            <div style={{marginTop:8}}>
+              <div className="row" style={{gap:10,alignItems:"center",flexWrap:"wrap"}}>
+                <button type="button" className="btn ghost" style={{borderColor:"#15803d",color:"#15803d",fontSize:13}}
+                  onClick={testMikrotik} disabled={pingState==="loading"}>
+                  {pingState==="loading"?"⏳ Connexion en cours...":"🔌 Tester la connexion"}
+                </button>
+                {pingState&&pingState!=="loading"&&(
+                  <span style={{
+                    display:"inline-flex",alignItems:"center",gap:6,
+                    padding:"5px 12px",borderRadius:20,fontSize:13,fontWeight:600,
+                    background:pingState.ok?"#dcfce7":"#fef2f2",
+                    color:pingState.ok?"#15803d":"#dc2626",
+                    border:`1px solid ${pingState.ok?"#86efac":"#fca5a5"}`,
+                  }}>
+                    {pingState.ok?"✅":"❌"} {pingState.msg}
+                  </span>
+                )}
+              </div>
+            </div>
+          )}
         </div>
         {suc&&blockers.length>0&&(
           <div style={{background:"#fdf3e3",borderLeft:"4px solid var(--accent)",borderRadius:"0 8px 8px 0",padding:"10px 12px",fontSize:12.5}}>
