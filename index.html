@@ -374,6 +374,17 @@ function JustificatifsGallery({items,onAdd,onDelete,canEdit,loading}){
 
 const SUPABASE_URL = "https://gnozuazcvtzogciqrjbr.supabase.co";
 const SUPABASE_KEY = "sb_publishable_A-iLVBJDV2b4gyzQsCJXIg_xaZE3H30";
+// Base URL pour les appels API Vercel (mikrotik-sales, mikrotik-ping, send-sms).
+// Quand l'app tourne sur Vercel elle-même, on utilise des chemins relatifs ("/api/...").
+// Quand elle tourne en local (fichier Android, Electron, file://...), on pointe vers Vercel directement.
+const VERCEL_API_BASE=(()=>{
+  try{
+    const h=window.location.hostname;
+    if(h==="localhost"||h==="127.0.0.1"||h===""||h.endsWith(".local")) return "https://genx-wifizone.vercel.app";
+    if(window.location.protocol==="file:") return "https://genx-wifizone.vercel.app";
+    return ""; // hébergé sur Vercel → chemins relatifs
+  }catch(e){ return "https://genx-wifizone.vercel.app"; }
+})();
 window._SUPABASE_ANON_KEY = SUPABASE_KEY;
 const sb = (window.supabase && SUPABASE_URL && SUPABASE_KEY)
   ? window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY)
@@ -12939,7 +12950,7 @@ function MikrotikImportModal({defaultMonth,onClose}){
     setLoading(true);setErr("");setResult(null);setPreview([]);
     try{
       const params=new URLSearchParams({annexe_id:selAnnexeId,month:toMikrotikMonth(selMonth)});
-      const resp=await fetch(`/api/mikrotik-sales?${params}`);
+      const resp=await fetch(`${VERCEL_API_BASE}/api/mikrotik-sales?${params}`);
       const data=await resp.json().catch(()=>null);
       if(!resp.ok||!data?.ok){
         const msg=data?.detail?`${data.error}: ${data.detail}`:data?.error||"Erreur connexion MikroTik";
@@ -16905,7 +16916,7 @@ function SurcursaleModal({suc,onClose}){
   const testMikrotik=async()=>{
     setPingState("loading");
     try{
-      const resp=await fetch("/api/mikrotik-ping",{
+      const resp=await fetch(`${VERCEL_API_BASE}/api/mikrotik-ping`,{
         method:"POST",
         headers:{"Content-Type":"application/json"},
         body:JSON.stringify({host:f.mikrotikHost,port:f.mikrotikPort||8728,user:f.mikrotikUser,password:f.mikrotikPassword||""}),
@@ -19833,7 +19844,7 @@ function SMSPage(){
       if(!phone){results.push({name:emp.name,phone:emp.phone,status:"error",error:"Numéro invalide"});continue;}
       try{
         // Appel via Vercel Serverless Function /api/send-sms (pas de CORS)
-        const resp=await fetch("/api/send-sms",{
+        const resp=await fetch(`${VERCEL_API_BASE}/api/send-sms`,{
           method:"POST",
           headers:{"Content-Type":"application/json"},
           body:JSON.stringify({
