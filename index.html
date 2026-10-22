@@ -1982,9 +1982,15 @@ function buildVisibleKeys(db, nav, scopedAnnexeIds, scopedSubIds, userScope){
 }
 
 function enrichVisibleKeysWithMigratedSubs(db, visibleKeys){
-  // Pour chaque ancien subsidiary dont la filiale-annexe cible est visible, ajouter sa clé subsidiary
+  // Pour chaque ancien subsidiary dont la filiale-annexe cible est visible, ajouter sa clé subsidiary.
+  // IMPORTANT : on vérifie que annexeId est une VRAIE annexe (db.annexes) dans le périmètre courant,
+  // pas une succursale migrée dont l'id est identique à l'annexeId du mapping.
+  // Exemple : anx_fa7jl8q peut devenir une succursale rattachée à GERW tout en restant cible du
+  // mapping sub-wifi/sub_526a1wj. Sans ce garde-fou, visibleKeys(GERW) inclurait "subsidiary:sub-wifi"
+  // car "annexe:anx_fa7jl8q" y apparaît (via la succursale migrée), créant une fuite GW→GERW.
+  const annexeIds=new Set((db.annexes||[]).map(a=>a.id));
   Object.entries(LEGACY_SUB_TO_ANNEXE).forEach(([subId,annexeId])=>{
-    if(visibleKeys.has(cashKeyOf("annexe",annexeId))){
+    if(annexeIds.has(annexeId) && visibleKeys.has(cashKeyOf("annexe",annexeId))){
       visibleKeys.add(cashKeyOf("subsidiary",subId));
     }
   });
@@ -5491,41 +5497,39 @@ function CashJournal(){
     return false;
   };
   const inScope=(level,id)=>visibleKeys.has(cashKeyOf(level,id));
-  // inScopeExpense : gère les 3 cas de rattachement d'une dépense
-  // Cas 1 : dépense avec annexeId/succursaleId directement dans les clés visibles
-  // Cas 2 : dépense subsidiaire (level=subsidiary, pas d'annexeId) — incluse si la filiale a des annexes visibles
-  // Cas 3 (migration) : dépense stockée avec l'ancien subsidiaryId (ex: sub_8kcyav5=GER) dont les anciennes
-  //   annexes sont devenues des succursales sous GERW — on remonte via db.succursales pour trouver l'annexe parente
+  // inScopeExpense : même logique que expInScope (section Dépenses) pour garantir la cohérence du périmètre.
+  // On se base sur scopedAnnexeIds/scopedSubIds (hiérarchie DB réelle) plutôt que sur visibleKeys
+  // qui peut contenir des succursales migrées d'autres groupes (ex : succursale GW rattachée à GERW).
+  const _cajSucAllIds=(db.succursales||[]).filter(s=>scopedAnnexeIds.includes(s.annexeId)).map(s=>s.id);
+  const _cajSucIds=(userScope?.sucIds?.length>0)?_cajSucAllIds.filter(id=>userScope.sucIds.includes(id)):_cajSucAllIds;
+  const _LEGACY_TO_ANNEXE={"sub-wifi":"anx_fa7jl8q","sub_8kcyav5":"anx_yvbrtg3","sub_526a1wj":"anx_fa7jl8q"};
+  const _LEGACY_SUB=new Set(["sub-wifi","sub_8kcyav5","sub_526a1wj"]);
   const inScopeExpense=(e)=>{
-    const level=e.level==="holding"?"holding":e.annexeId?"annexe":e.subsidiaryId?"subsidiary":null;
-    const id=e.level==="holding"?null:e.annexeId||e.subsidiaryId;
-    if(!level) return false;
-    // Cas direct : l'ID est directement visible
-    if(inScope(level,id)) return true;
-    // Cas annexe non trouvée directement : vérifier si cet ID est une succursale migrée
-    // (ancien annexeId devenu succursale — la clé caisse reste "annexe:id")
-    if(level==="annexe" && id){
-      // Si c'est une succursale, son annexeId parent doit être visible
-      const suc=(db.succursales||[]).find(s=>s.id===id);
-      if(suc && visibleKeys.has(cashKeyOf("annexe",suc.annexeId))) return true;
+    const aid=e.annexeId;
+    const sid=e.subsidiaryId;
+    if(nav.level==="holding"){
+      if(!aid&&!sid) return e.level==="holding";
+      if(!aid&&sid) return (scopedSubIds||[]).includes(sid)||_LEGACY_SUB.has(sid);
+      if(aid) return scopedAnnexeIds.includes(aid)||_cajSucIds.includes(aid);
+      return true;
     }
-    // Cas subsidiary : vérifier si une annexe ou succursale de cette filiale est visible
-    if(level==="subsidiary" && id){
-      // Annexes directes de la filiale
-      const subAnnexeIds=(db.annexes||[]).filter(a=>a.subsidiaryId===id).map(a=>a.id);
-      if(subAnnexeIds.some(aid=>visibleKeys.has(cashKeyOf("annexe",aid)))) return true;
-      // Succursales dont l'annexeId est dans les annexes visibles (migration : ancien GER → succursales sous GERW)
-      const sucIds=(db.succursales||[]).filter(s=>subAnnexeIds.includes(s.annexeId)||(db.subsidiaries||[]).find(x=>x.id===id) && (db.annexes||[]).filter(a=>a.subsidiaryId===id).map(a=>a.id).includes(s.annexeId)).map(s=>s.id);
-      if(sucIds.some(sid=>visibleKeys.has(cashKeyOf("annexe",sid)))) return true;
-      // Cas migration directe : les succursales portent l'ancien id de l'annexe (anx_xb7zjrw → succursale)
-      // Chercher si une succursale visible a pour annexeId une annexe appartenant à cette filiale
-      const visibleSucIds=[...visibleKeys].filter(k=>k.startsWith("annexe:")).map(k=>k.split(":")[1]);
-      const migratedSucs=(db.succursales||[]).filter(s=>visibleSucIds.includes(s.id));
-      return migratedSucs.some(s=>{
-        const parentAnnexe=(db.annexes||[]).find(a=>a.id===s.annexeId);
-        return parentAnnexe && parentAnnexe.subsidiaryId===id;
-      }) || migratedSucs.some(s=> subAnnexeIds.includes(s.id));
+    if(nav.level==="subsidiary"){
+      if(!aid&&sid){
+        if((scopedSubIds||[]).includes(sid)) return true;
+        const targetAnnexe=_LEGACY_TO_ANNEXE[sid];
+        return targetAnnexe ? scopedAnnexeIds.includes(targetAnnexe) : false;
+      }
+      return scopedAnnexeIds.includes(aid)||_cajSucIds.includes(aid);
     }
+    if(nav.level==="annexe"){
+      if(aid===nav.id) return true;
+      if((db.succursales||[]).filter(s=>s.annexeId===nav.id).some(s=>s.id===aid)) return true;
+      if(!aid&&sid){
+        return _LEGACY_TO_ANNEXE[sid]===nav.id;
+      }
+      return false;
+    }
+    if(nav.level==="succursale") return aid===nav.id||e.succursaleId===nav.id;
     return false;
   };
   const nameOf=(level,id)=> level==="holding"?"Holding":level==="subsidiary"?(subById(id)?.code||"Groupe"):(annexeById(id)?.code||(db.succursales||[]).find(s=>s.id===id)?.code||(db.succursales||[]).find(s=>s.id===id)?.name||"Filiale");
@@ -5534,7 +5538,7 @@ function CashJournal(){
   //  "reel"    = vrais flux : ventes + dépenses + apports/retraits de fonds propres (SANS transferts inter-caisses)
   //  "filiale" = uniquement les mouvements de la caisse PROPRE de le groupe : remontées reçues des filiales + réinjections vers les filiales
   const [mode,setMode]=useState("reel");
-  const filialeMode = nav.level==="subsidiary" || nav.level==="holding"; // choix disponible au niveau filiale ET holding
+  const filialeMode = nav.level==="subsidiary" || nav.level==="holding" || nav.level==="annexe"; // choix disponible au niveau filiale (subsidiary OU annexe) ET holding
 
   // Construction des écritures : TOUTES les opérations qui affectent la caisse.
   // ENTRÉES : ventes (regroupées par vendeur) + argent reçu d'une autre caisse
@@ -5602,9 +5606,9 @@ function CashJournal(){
     // Tout ce qui touche réellement la caisse propre de ce niveau :
     //  ENTRÉES : remontées reçues (des filiales/filiales) + retraits de banque à ce niveau + apports de fonds propres
     //  SORTIES : réinjections envoyées (vers annexes/filiales) + VRAIES dépenses faites à ce niveau + dépôts en banque + retraits de fonds propres
-    // La caisse propre = celle du niveau affiché (subsidiary:nav.id, ou "holding").
-    const propreKey = nav.level==="holding" ? "holding" : cashKeyOf("subsidiary",nav.id);
-    const propreLevel = nav.level==="holding" ? "holding" : "subsidiary";
+    // La caisse propre = celle du niveau affiché (subsidiary:nav.id, annexe:nav.id, ou "holding").
+    const propreKey = nav.level==="holding" ? "holding" : cashKeyOf(nav.level==="annexe"?"annexe":"subsidiary",nav.id);
+    const propreLevel = nav.level==="holding" ? "holding" : nav.level==="annexe" ? "annexe" : "subsidiary";
     const propreId = nav.level==="holding" ? null : nav.id;
     const isPropre=(level,id)=>cashKeyOf(level,id)===propreKey;
     // Remontées reçues / réinjections envoyées (transferts inter-caisses où CETTE caisse est source ou destination)
@@ -5765,7 +5769,7 @@ function CashJournal(){
         const v=e.amount||0; if(v>0) ext.push({date:e.date,label:"Dépense"+(e.category?" — "+e.category:"")+(e.note?" ("+e.note+")":""),amount:v});
       });
     } else if(mode==="filiale"){
-      const propreKey=nav.level==="holding"?"holding":cashKeyOf("subsidiary",nav.id);
+      const propreKey=nav.level==="holding"?"holding":cashKeyOf(nav.level==="annexe"?"annexe":"subsidiary",nav.id);
       const isPropre=(level,id)=>cashKeyOf(level,id)===propreKey;
       (db.cashMoves||[]).forEach(m=>{ if(!inMo(m.date)) return; const v=m.amount||0; if(v<=0) return;
         const fromKey=cashKeyOf(m.fromLevel,m.fromId), toKey=cashKeyOf(m.toLevel,m.toId);
@@ -5934,9 +5938,9 @@ function CashJournal(){
 
       {/* Choix du mode — au niveau filiale (toutes annexes) et au niveau holding */}
       {filialeMode && (()=>{
-        const niveauMot = nav.level==="holding" ? "la holding" : nav.level==="succursale" ? "la succursale" : "le groupe";
-        const enfantsMot = nav.level==="holding" ? "des groupes" : nav.level==="succursale" ? "de la succursale" : "des filiales";
-        const enfantsMot2 = nav.level==="holding" ? "les groupes" : "les filiales";
+        const niveauMot = nav.level==="holding" ? "la holding" : nav.level==="succursale" ? "la succursale" : nav.level==="annexe" ? "la filiale" : "le groupe";
+        const enfantsMot = nav.level==="holding" ? "des groupes" : nav.level==="succursale" ? "de la succursale" : nav.level==="annexe" ? "des succursales" : "des filiales";
+        const enfantsMot2 = nav.level==="holding" ? "les groupes" : nav.level==="annexe" ? "les succursales" : "les filiales";
         return (
         <div style={{display:"flex",flexWrap:"wrap",gap:8,alignItems:"center",background:"var(--paper)",borderRadius:10,padding:"8px 12px",marginBottom:12}}>
           <span className="muted" style={{fontSize:12.5,fontWeight:600}}>Vue :</span>
@@ -8297,7 +8301,16 @@ function Expenses(){
       return true;
     }
     if(nav.level==="subsidiary"){
-      if(!aid&&sid) return (scopedSubIds||[]).includes(sid)||LEGACY_SUB.has(sid);
+      if(!aid&&sid){
+        // Dépense au niveau subsidiary sans annexeId : visible si sid est dans le périmètre
+        if((scopedSubIds||[]).includes(sid)) return true;
+        // Legacy : sid est un ancien subsidiary — visible UNIQUEMENT si son annexe cible
+        // (LEGACY_SUB_TO_ANNEXE) est une vraie annexe dans le périmètre courant.
+        // Évite que sub-wifi/sub_526a1wj (GW) passent dans GERW via anx_fa7jl8q.
+        const LEGACY_TO_ANNEXE={"sub-wifi":"anx_fa7jl8q","sub_8kcyav5":"anx_yvbrtg3","sub_526a1wj":"anx_fa7jl8q"};
+        const targetAnnexe=LEGACY_TO_ANNEXE[sid];
+        return targetAnnexe ? scopedAnnexeIds.includes(targetAnnexe) : false;
+      }
       return scopedAnnexeIds.includes(aid)||sucIds.includes(aid);
     }
     if(nav.level==="annexe"){
@@ -12914,79 +12927,82 @@ function MikrotikImportModal({defaultMonth,onClose}){
   const [result,setResult]=useState(null);
   const [err,setErr]=useState("");
   const [preview,setPreview]=useState([]);
-  const [checked,setChecked]=useState({});
   const [importing,setImporting]=useState(false);
 
-  // Convertir "2026-10" → "102026" (format Mikhmon owner)
   const toMikrotikMonth=(ym)=>{
     const [y,m]=ym.split("-");
-    return m+y; // "102026"
+    return m+y;
   };
 
   const fetchSales=async()=>{
-    if(!selAnnexeId){setErr("Choisissez une succursale.");return;}
-    setLoading(true);setErr("");setResult(null);setPreview([]);setChecked({});
+    if(!selAnnexeId){setErr("Choisissez une filiale.");return;}
+    setLoading(true);setErr("");setResult(null);setPreview([]);
     try{
-      const month=toMikrotikMonth(selMonth);
-      const resp=await fetch(`/api/mikrotik-sales?annexe_id=${selAnnexeId}&month=${month}`);
-      const data=await resp.json().catch(()=>({ok:false,error:"Réponse invalide"}));
-      if(!data.ok){
-        const detail=(data.detail&&data.detail.trim())?`: ${data.detail}`:"";
-        setErr(`${data.error||"Erreur"}${detail}`);
-      } else {
-        setResult(data);
-        // Détecter les entrées déjà importées (même succursale, même mois)
-        const existing=new Set((db.partnerRevenues||[]).filter(r=>r.succursaleId===selAnnexeId&&r.date&&r.date.startsWith(selMonth)).map(r=>r.mikrotikRef||""));
-        const rows=(data.byDay||[]).map(d=>({...d,alreadyExists:existing.has(d.date)}));
-        setPreview(rows);
-        const initChecked={};rows.forEach(r=>{if(!r.alreadyExists)initChecked[r.date]=true;});
-        setChecked(initChecked);
+      const params=new URLSearchParams({annexe_id:selAnnexeId,month:toMikrotikMonth(selMonth)});
+      const resp=await fetch(`/api/mikrotik-sales?${params}`);
+      const data=await resp.json().catch(()=>null);
+      if(!resp.ok||!data?.ok){
+        const msg=data?.detail?`${data.error}: ${data.detail}`:data?.error||"Erreur connexion MikroTik";
+        throw new Error(msg);
       }
-    }catch(e){setErr(e.message||"Erreur réseau");}
+      setResult(data);
+      const annexe=wifiAnnexes.find(a=>a.id===selAnnexeId);
+      const existingRevDates=new Set((db.partnerRevenues||[]).filter(r=>r.annexeId===selAnnexeId&&r.date&&r.date.slice(0,7)===selMonth).map(r=>r.date));
+      setPreview((data.byDay||[]).map(d=>({
+        date:d.date,
+        amount:d.total,
+        count:d.count,
+        annexeId:selAnnexeId,
+        annexeName:annexe?.name||annexe?.code||annexe?.id||"",
+        alreadyExists:existingRevDates.has(d.date),
+        skip:existingRevDates.has(d.date),
+      })));
+    }catch(e){setErr(e.message||"Erreur de connexion MikroTik");}
     setLoading(false);
   };
 
+  const toggleSkip=(date)=>{
+    setPreview(prev=>prev.map(p=>p.date===date?{...p,skip:!p.skip}:p));
+  };
+
   const doImport=async()=>{
-    const toImport=preview.filter(r=>checked[r.date]);
-    if(!toImport.length){setErr("Aucune ligne sélectionnée.");return;}
-    setImporting(true);setErr("");
-    const suc=(db.succursales||[]).find(s=>s.id===selAnnexeId);
-    const newRevs=toImport.map(r=>({
-      id:uid("rev"),
-      date:r.date,
-      amount:r.total,
-      annexeId:suc?.annexeId||"",
-      succursaleId:selAnnexeId,
-      note:`MikroTik ${suc?.name||""} — ${r.count} vente(s)`,
-      mikrotikRef:r.date,
-      source:"mikrotik",
-      createdBy:user.id,
-      createdAt:nowISO(),
-    }));
+    const toImport=preview.filter(p=>!p.skip&&p.amount>0);
+    if(toImport.length===0){setErr("Aucune ligne à importer (toutes ignorées ou montant zéro).");return;}
+    setImporting(true);
     mutate(d=>{
-      if(!d.partnerRevenues)d.partnerRevenues=[];
-      d.partnerRevenues.push(...newRevs);
+      if(!d.partnerRevenues) d.partnerRevenues=[];
+      for(const row of toImport){
+        d.partnerRevenues.push({
+          id:uid("rev"),
+          date:row.date,
+          amount:row.amount,
+          note:`Import MikroTik — ${row.count} vente(s)`,
+          annexeId:row.annexeId,
+          annexeName:row.annexeName,
+          createdBy:user.id,
+          createdByName:user.name||user.login,
+          createdAt:nowISO(),
+          updatedBy:user.id,
+          updatedByName:user.name||user.login,
+          updatedAt:nowISO(),
+        });
+      }
     });
     setImporting(false);
     onClose();
   };
 
-  const allChecked=preview.length>0&&preview.filter(r=>!r.alreadyExists).every(r=>checked[r.date]);
-  const toggleAll=()=>{
-    const next={};
-    preview.filter(r=>!r.alreadyExists).forEach(r=>{next[r.date]=!allChecked;});
-    setChecked(next);
-  };
+  const toImportCount=preview.filter(p=>!p.skip&&p.amount>0).length;
 
   return (
     <Modal title="📡 Import MikroTik" onClose={onClose}
-      foot={<><button className="btn ghost" onClick={onClose}>Fermer</button>{preview.length>0&&<button className="btn" style={{background:"#15803d",color:"#fff"}} onClick={doImport} disabled={importing||!Object.values(checked).some(Boolean)}>{importing?"Importation...":"✅ Importer la sélection"}</button>}</>}>
+      foot={<><button className="btn ghost" onClick={onClose}>Fermer</button>{preview.length>0&&<button className="btn" style={{background:"#15803d",color:"#fff"}} onClick={doImport} disabled={importing||toImportCount===0}>{importing?"Importation...":"✅ Importer la sélection"}</button>}</>}>
       <div className="grid" style={{gap:14}}>
         {err&&<div className="err">{err}</div>}
         <div className="row" style={{gap:12,flexWrap:"wrap"}}>
           <div style={{flex:1,minWidth:160}}>
             <Field label="Succursale WiFi">
-              <select value={selAnnexeId} onChange={e=>{setSelAnnexeId(e.target.value);setResult(null);setPreview([]);setChecked({});}}>
+              <select value={selAnnexeId} onChange={e=>{setSelAnnexeId(e.target.value);setResult(null);setPreview([]);}}>
                 <option value="">— Choisir —</option>
                 {wifiAnnexes.map(s=><option key={s.id} value={s.id}>{s.name||s.code}</option>)}
               </select>
@@ -12994,7 +13010,7 @@ function MikrotikImportModal({defaultMonth,onClose}){
           </div>
           <div style={{flex:1,minWidth:140}}>
             <Field label="Mois">
-              <input type="month" value={selMonth} onChange={e=>{setSelMonth(e.target.value);setResult(null);setPreview([]);setChecked({});}}/>
+              <input type="month" value={selMonth} onChange={e=>{setSelMonth(e.target.value);setResult(null);setPreview([]);}}/>
             </Field>
           </div>
           <div style={{alignSelf:"flex-end",paddingBottom:2}}>
@@ -13012,22 +13028,16 @@ function MikrotikImportModal({defaultMonth,onClose}){
           <div style={{overflowX:"auto"}}>
             <table>
               <thead>
-                <tr>
-                  <th><input type="checkbox" checked={allChecked} onChange={toggleAll}/></th>
-                  <th>Date</th>
-                  <th className="right">Ventes</th>
-                  <th className="right">Total</th>
-                  <th>Statut</th>
-                </tr>
+                <tr><th>Date</th><th className="right">Ventes</th><th className="right">Total</th><th>Statut</th><th></th></tr>
               </thead>
               <tbody>
-                {preview.map(r=>(
-                  <tr key={r.date} style={{opacity:r.alreadyExists?0.5:1}}>
-                    <td><input type="checkbox" disabled={r.alreadyExists} checked={!!checked[r.date]} onChange={e=>setChecked({...checked,[r.date]:e.target.checked})}/></td>
-                    <td>{r.date}</td>
-                    <td className="right">{r.count}</td>
-                    <td className="right mono">{fcfa(r.total)}</td>
-                    <td>{r.alreadyExists?<span className="tag gray">Déjà importé</span>:<span className="tag green">Nouveau</span>}</td>
+                {preview.map(p=>(
+                  <tr key={p.date} style={{opacity:p.skip?0.45:1}}>
+                    <td>{p.date}</td>
+                    <td className="right">{p.count}</td>
+                    <td className="right mono">{fcfa(p.amount)}</td>
+                    <td>{p.alreadyExists?<span className="tag gray">Déjà importé</span>:<span className="tag green">Nouveau</span>}</td>
+                    <td><button className="btn sm ghost" onClick={()=>toggleSkip(p.date)}>{p.skip?"Inclure":"Ignorer"}</button></td>
                   </tr>
                 ))}
               </tbody>
