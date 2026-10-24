@@ -12939,10 +12939,79 @@ function MikrotikImportModal({defaultMonth,onClose}){
   const [err,setErr]=useState("");
   const [preview,setPreview]=useState([]);
   const [importing,setImporting]=useState(false);
+  const csvInputRef=React.useRef(null);
 
   const toMikrotikMonth=(ym)=>{
     const [y,m]=ym.split("-");
     return m+y;
+  };
+
+  const buildPreviewFromSales=(sales,annexeId,targetMonth)=>{
+    const month=targetMonth||selMonth;
+    const annexe=wifiAnnexes.find(a=>a.id===annexeId);
+    const existingRevDates=new Set((db.partnerRevenues||[]).filter(r=>r.annexeId===annexeId&&r.date&&r.date.slice(0,7)===month).map(r=>r.date));
+    const byDay={};
+    for(const s of sales){
+      const d=s.date;
+      if(!d) continue;
+      if(!byDay[d]) byDay[d]={date:d,count:0,total:0};
+      byDay[d].count++;
+      byDay[d].total+=s.price;
+    }
+    const days=Object.values(byDay).sort((a,b)=>a.date.localeCompare(b.date));
+    setPreview(days.map(d=>({
+      date:d.date,
+      amount:d.total,
+      count:d.count,
+      annexeId,
+      annexeName:annexe?.name||annexe?.code||annexe?.id||"",
+      alreadyExists:existingRevDates.has(d.date),
+      skip:existingRevDates.has(d.date),
+    })));
+    return days.reduce((s,d)=>s+d.count,0);
+  };
+
+  const importCSV=(e)=>{
+    const file=e.target.files?.[0];
+    if(!file) return;
+    if(!selAnnexeId){setErr("Choisissez une succursale avant d'importer le CSV.");return;}
+    setErr("");setResult(null);setPreview([]);
+    const reader=new FileReader();
+    reader.onload=(ev)=>{
+      try{
+        const lines=ev.target.result.split(/\r?\n/);
+        const sales=[];
+        for(const line of lines){
+          const cols=line.split(",");
+          // Ligne de données : №,Date,Time,Username,Profile,Comment,Price
+          // La 1ère colonne est un numéro entier, la 2ème est une date YYYY-MM-DD
+          if(cols.length<7) continue;
+          const num=cols[0].trim();
+          if(!/^\d+$/.test(num)) continue; // ignorer entête et totaux
+          const date=cols[1].trim();
+          if(!/^\d{4}-\d{2}-\d{2}$/.test(date)) continue;
+          // Vérifier que la date correspond au mois sélectionné
+          if(date.slice(0,7)!==selMonth) continue;
+          const price=parseInt(cols[6].trim(),10);
+          if(isNaN(price)||price<=0) continue;
+          sales.push({
+            date,
+            time:cols[2].trim(),
+            username:cols[3].trim(),
+            profile:cols[4].trim(),
+            price,
+          });
+        }
+        if(sales.length===0){setErr("Aucune vente trouvée dans ce CSV pour le mois sélectionné ("+selMonth+").");return;}
+        const capturedMonth=selMonth;
+        const count=buildPreviewFromSales(sales,selAnnexeId,capturedMonth);
+        const annexe=wifiAnnexes.find(a=>a.id===selAnnexeId);
+        setResult({count,annexe:annexe?.name||annexe?.code||selAnnexeId,source:"csv"});
+      }catch(ex){setErr("Erreur lecture CSV : "+ex.message);}
+    };
+    reader.readAsText(file);
+    // Réinitialiser l'input pour permettre re-import du même fichier
+    e.target.value="";
   };
 
   const fetchSales=async()=>{
@@ -12956,7 +13025,7 @@ function MikrotikImportModal({defaultMonth,onClose}){
         const msg=data?.detail?`${data.error}: ${data.detail}`:data?.error||"Erreur connexion MikroTik";
         throw new Error(msg);
       }
-      setResult(data);
+      setResult({...data,source:"api"});
       const annexe=wifiAnnexes.find(a=>a.id===selAnnexeId);
       const existingRevDates=new Set((db.partnerRevenues||[]).filter(r=>r.annexeId===selAnnexeId&&r.date&&r.date.slice(0,7)===selMonth).map(r=>r.date));
       setPreview((data.byDay||[]).map(d=>({
@@ -12979,27 +13048,36 @@ function MikrotikImportModal({defaultMonth,onClose}){
   const doImport=async()=>{
     const toImport=preview.filter(p=>!p.skip&&p.amount>0);
     if(toImport.length===0){setErr("Aucune ligne à importer (toutes ignorées ou montant zéro).");return;}
+    // Capturer les valeurs stables AVANT le mutate (évite les closures stale)
+    const annexeRef=wifiAnnexes.find(a=>a.id===selAnnexeId);
+    const annexeIdRef=selAnnexeId||null;
+    const annexeNameRef=annexeRef?.name||annexeRef?.code||annexeRef?.id||null;
+    const userIdRef=user?.id;
+    const userNameRef=user?.name||user?.login||"";
     setImporting(true);
-    mutate(d=>{
-      if(!d.partnerRevenues) d.partnerRevenues=[];
-      for(const row of toImport){
-        d.partnerRevenues.push({
-          id:uid("rev"),
-          date:row.date,
-          amount:row.amount,
-          note:`Import MikroTik — ${row.count} vente(s)`,
-          annexeId:row.annexeId,
-          annexeName:row.annexeName,
-          createdBy:user.id,
-          createdByName:user.name||user.login,
-          createdAt:nowISO(),
-          updatedBy:user.id,
-          updatedByName:user.name||user.login,
-          updatedAt:nowISO(),
-        });
-      }
-    });
-    setImporting(false);
+    try{
+      mutate(d=>{
+        if(!d.partnerRevenues) d.partnerRevenues=[];
+        for(const row of toImport){
+          d.partnerRevenues.push({
+            id:uid("rev"),
+            date:row.date,
+            amount:Number(row.amount),
+            note:`Import MikroTik — ${row.count} vente(s)`,
+            annexeId:annexeIdRef,
+            annexeName:annexeNameRef,
+            createdBy:userIdRef,
+            createdByName:userNameRef,
+            createdAt:nowISO(),
+            updatedBy:userIdRef,
+            updatedByName:userNameRef,
+            updatedAt:nowISO(),
+          });
+        }
+      });
+    }finally{
+      setImporting(false);
+    }
     onClose();
   };
 
@@ -13024,15 +13102,19 @@ function MikrotikImportModal({defaultMonth,onClose}){
               <input type="month" value={selMonth} onChange={e=>{setSelMonth(e.target.value);setResult(null);setPreview([]);}}/>
             </Field>
           </div>
-          <div style={{alignSelf:"flex-end",paddingBottom:2}}>
+          <div style={{alignSelf:"flex-end",paddingBottom:2,display:"flex",gap:8}}>
             <button className="btn" onClick={fetchSales} disabled={loading||!selAnnexeId}>
               {loading?"⏳ Chargement...":"🔍 Récupérer"}
             </button>
+            <button className="btn ghost" onClick={()=>csvInputRef.current?.click()} disabled={!selAnnexeId} title="Importer depuis un fichier CSV Mikhmon">
+              📂 CSV
+            </button>
+            <input ref={csvInputRef} type="file" accept=".csv" style={{display:"none"}} onChange={importCSV}/>
           </div>
         </div>
         {result&&(
           <div style={{fontSize:13,color:"#15803d",padding:"8px 12px",background:"#f0fdf4",borderRadius:8,border:"1px solid #86efac"}}>
-            ✅ <b>{result.count}</b> vente(s) récupérée(s) depuis <b>{result.annexe}</b>
+            ✅ <b>{result.count}</b> vente(s) {result.source==="csv"?"lue(s) depuis le fichier CSV":"récupérée(s) depuis l'API"} — <b>{result.annexe}</b>
           </div>
         )}
         {preview.length>0&&(
