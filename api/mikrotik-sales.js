@@ -58,7 +58,7 @@ export default async function handler(req, res) {
     port:     mikPort,
     user:     annexe.mikrotik_user,
     password: annexe.mikrotik_password || '',
-    timeout:  25000, // 25s — récupération de tous les scripts mikhmon
+    timeout:  28000, // 28s — max avant limite Vercel 30s
     keepalive: false,
   });
 
@@ -66,9 +66,17 @@ export default async function handler(req, res) {
   try {
     await conn.connect();
 
-    // 3. Récupérer tous les scripts mikhmon (le filtre RouterOS sur owner/source n'est pas fiable)
-    // On filtre côté Node.js après réception
-    const rawItems = await conn.write('/system/script/print', { '?comment': 'mikhmon' });
+    // 3. Filtrer directement côté RouterOS par mois/jour/tout
+    // — réduit drastiquement le volume pour les zones à fort trafic (Lagune, BE)
+    let queryFilter;
+    if (month) {
+      queryFilter = { '?owner': month };          // "MMYYYY" ex: "102026"
+    } else if (day) {
+      queryFilter = { '?source': day };           // "YYYY-MM-DD" ex: "2026-10-15"
+    } else {
+      queryFilter = { '?comment': 'mikhmon' };    // toutes les ventes
+    }
+    const rawItems = await conn.write('/system/script/print', queryFilter);
     await conn.close();
 
     // 4. Parser le champ name: "date-|-time-|-user-|-price-|-...-|-...-|-...-|-profile-|-comment"
@@ -87,17 +95,13 @@ export default async function handler(req, res) {
 
       const saleDate = parts[0] || item.source || '';  // "YYYY-MM-DD"
 
-      // Filtre côté Node.js — plus fiable que le filtre RouterOS
+      // Filtre de sécurité côté Node.js (double vérification)
       if (month) {
-        // month = "MMYYYY" ex: "102026" → on compare avec owner du script
-        // OU on compare la date: saleDate.slice(0,7) === "2026-10"
         const scriptOwner = item.owner || '';
         const saleDateYM  = saleDate.length >= 7 ? saleDate.slice(0, 7) : ''; // "2026-10"
-        // Reconstruire "MMYYYY" depuis la date pour comparaison robuste
         const saleMM = saleDateYM ? saleDateYM.slice(5, 7).replace(/^0/, '') + saleDateYM.slice(0, 4) : '';
         if (scriptOwner !== month && saleMM !== month) continue;
       } else if (day) {
-        // day = "YYYY-MM-DD"
         if (saleDate !== day && item.source !== day) continue;
       }
 
