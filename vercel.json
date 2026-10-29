@@ -3,6 +3,9 @@
     "api/send-sms.js": {
       "memory": 128,
       "maxDuration": 10
+    },
+    "api/mikrotik-active.js": {
+      "maxDuration": 30
     }
   }
 }
