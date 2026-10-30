@@ -1217,7 +1217,7 @@ function PrintButton({label,onClick,sm,ghost,kb}){
 function AppProvider({children}){
   const [db,setDb]=useState(null);          // null tant que pas chargé depuis Supabase
   const [loadError,setLoadError]=useState(null);
-  const [user,setUser]=useState(()=>{ try{return JSON.parse(sessionStorage.getItem("genx_user"))}catch(e){return null} });
+  const [user,setUser]=useState(()=>{ let raw=null; try{ raw=localStorage.getItem("genx_user"); }catch(e){} if(!raw){ try{ raw=sessionStorage.getItem("genx_user"); if(raw){ const old=JSON.parse(raw); if(old&&typeof old==="object"){ const copie=Object.assign({},old); delete copie.password; localStorage.setItem("genx_user",JSON.stringify(copie)); } } }catch(e){} } try{ return raw?JSON.parse(raw):null; }catch(e){ return null; } }); // v1.8.7 : session gardée entre onglets (localStorage), reprise de l'ancienne sessionStorage
   // Navigation : { level:"holding" } | { level:"subsidiary", id } | { level:"annexe", id }
   const [nav,setNav]=useState({level:"holding"});
   const dbRef = React.useRef(null);          // dernière version connue (pour saveDiff et temps réel)
@@ -1394,7 +1394,7 @@ function AppProvider({children}){
     return ()=>{ sb.removeChannel(channel); if(reloadTimer.current) clearTimeout(reloadTimer.current); document.removeEventListener("focusout", onDone); document.removeEventListener("click", onDone); };
   },[db===null]);
 
-  useEffect(()=>{ if(user) sessionStorage.setItem("genx_user",JSON.stringify(user)); else sessionStorage.removeItem("genx_user"); },[user]);
+  useEffect(()=>{ if(user){ try{ const copie=Object.assign({},user); delete copie.password; localStorage.setItem("genx_user",JSON.stringify(copie)); sessionStorage.removeItem("genx_user"); }catch(e){} } else { try{ localStorage.removeItem("genx_user"); }catch(e){} try{ sessionStorage.removeItem("genx_user"); }catch(e){} } },[user]); // v1.8.7 : copie stockée SANS password ; déconnexion = effacement des deux stockages
   // ===== RAPPORT MENSUEL TELEGRAM =====
   // Envoi automatique le 1er de chaque mois au premier chargement de la journée.
   // La clé localStorage "genx_monthly_report_sent" stocke "YYYY-MM" pour éviter
