@@ -1,4 +1,4 @@
-// api/mikrotik-active.js — Vercel Serverless Function (v1.8.5)
+// api/mikrotik-active.js — Vercel Serverless Function (v1.8.6)
 // Donne le NOMBRE D'UTILISATEURS CONNECTÉS sur les routeurs MikroTik.
 // Appelée par l'agent "surveillant-mikhmon" (relevés de 12 h et 22 h), PAS par le navigateur.
 //
@@ -21,11 +21,20 @@ import crypto from 'node:crypto';
 import { createClient } from '@supabase/supabase-js';
 import { RouterOSAPI } from 'node-routeros';
 
-// Délais (limite Vercel Hobby : 30 s). Les routeurs sont lus en parallèle,
-// donc le pire cas ≈ lecture base (5 s) + un routeur (8 s) + fermeture (2 s) ≈ 15 s.
-const DELAI_BASE_MS      = 5000;
-const DELAI_ROUTEUR_MS   = 8000;
-const DELAI_FERMETURE_MS = 2000;
+// Délais (limite Vercel maxDuration : 30 s). Les routeurs sont lus en parallèle.
+// v1.8.6 : le VPN mikroot est lent, le 1er essai échoue souvent → 2 essais par routeur.
+//   - lecture de la base          : 4 s maximum
+//   - 1er essai                   : 12 s maximum
+//   - 2e essai (si utile)         : 9 s maximum
+//   - fermeture d'une connexion   : 1 s maximum
+//   - BUDGET_ROUTEURS_MS          : tous les essais doivent être finis 25 s après le début de
+//     l'appel (le 2e essai est raccourci si besoin) → avec la dernière fermeture, ≤ 26 s au total.
+const DELAI_BASE_MS        = 4000;
+const DELAI_ESSAI1_MS      = 12000;
+const DELAI_ESSAI2_MS      = 9000;
+const DELAI_ESSAI_MIN_MS   = 3000;   // en dessous, un essai ne vaut pas la peine
+const DELAI_FERMETURE_MS   = 1000;
+const BUDGET_ROUTEURS_MS   = 25000;
 
 // ─── Utilitaires ────────────────────────────────────────────────────────────
 
@@ -58,6 +67,7 @@ function avecDelai(promesse, ms, code) {
     minuteur = setTimeout(() => {
       const e = new Error(code);
       e.code = code;
+      e.delai_ms = ms;
       reject(e);
     }, ms);
   });
@@ -79,57 +89,77 @@ function hoteEtPort(hoteBrut, portBrut) {
   return { host, port };
 }
 
-// Message d'erreur clair, SANS adresse ni port : on parle de la zone par son nom.
-function messageErreur(err, nomZone) {
+// Classe une erreur. L'ordre compte : identifiants avant « timeout ».
+function categorie(err) {
   const msg   = String((err && err.message) || '');
   const code  = String((err && (err.code || err.errno)) || '');
   const texte = (code + ' ' + msg).toLowerCase();
 
-  if (code === 'DELAI_DEPASSE')                                   return `Délai dépassé (${DELAI_ROUTEUR_MS / 1000} s) — routeur injoignable : ${nomZone}`;
-  if (texte.includes('econnrefused'))                             return `Connexion refusée par le routeur : ${nomZone} (port API fermé ?)`;
-  if (texte.includes('etimedout') || texte.includes('socktmout') || texte.includes('timeout') || texte.includes('timed out'))
-                                                                  return `Délai dépassé — routeur injoignable : ${nomZone}`;
-  if (texte.includes('enotfound') || texte.includes('eai_again')) return `Adresse du routeur introuvable : ${nomZone}`;
-  if (texte.includes('ehostunreach') || texte.includes('enetunreach')) return `Routeur hors réseau : ${nomZone}`;
+  if (code === 'DELAI_DEPASSE')                                        return 'delai';
   if (texte.includes('cantlogin') || texte.includes('cannot log in') || texte.includes('wrong credentials') ||
-      texte.includes('invalid user') || texte.includes('login failure'))
-                                                                  return `Identifiant ou mot de passe MikroTik incorrect : ${nomZone}`;
-  if (texte.includes('econnreset') || texte.includes('closed'))  return `Connexion interrompue par le routeur : ${nomZone}`;
-  if (texte.includes('no such command'))                          return `Commande non disponible sur ce routeur : ${nomZone}`;
-  // Message inconnu : on ne le recopie pas (il pourrait contenir l'adresse du routeur).
-  return `Lecture du routeur impossible : ${nomZone}`;
+      texte.includes('invalid user') || texte.includes('login failure')) return 'identifiants';
+  if (texte.includes('enotfound'))                                     return 'introuvable';
+  if (texte.includes('no such command'))                               return 'commande';
+  if (texte.includes('econnrefused'))                                  return 'refus';
+  if (texte.includes('etimedout') || texte.includes('socktmout') || texte.includes('timeout') || texte.includes('timed out'))
+                                                                       return 'delai';
+  if (texte.includes('ehostunreach') || texte.includes('enetunreach') || texte.includes('eai_again')) return 'reseau';
+  if (texte.includes('econnreset') || texte.includes('closed'))       return 'coupure';
+  return 'autre';
+}
+
+// Un 2e essai ne sert à rien si les identifiants sont faux, si l'adresse n'existe pas,
+// ou si le routeur ne connaît pas la commande.
+function nouvelEssaiUtile(err) {
+  const c = categorie(err);
+  return c !== 'identifiants' && c !== 'introuvable' && c !== 'commande';
+}
+
+// Message d'erreur clair, SANS adresse ni port : on parle de la zone par son nom.
+function messageErreur(err, nomZone) {
+  switch (categorie(err)) {
+    case 'delai':
+      return (err && err.code === 'DELAI_DEPASSE' && err.delai_ms)
+        ? `Délai dépassé (${Math.round(err.delai_ms / 1000)} s) — routeur injoignable : ${nomZone}`
+        : `Délai dépassé — routeur injoignable : ${nomZone}`;
+    case 'identifiants': return `Identifiant ou mot de passe MikroTik incorrect : ${nomZone}`;
+    case 'introuvable':  return `Adresse du routeur introuvable : ${nomZone}`;
+    case 'commande':     return `Commande non disponible sur ce routeur : ${nomZone}`;
+    case 'refus':        return `Connexion refusée par le routeur : ${nomZone} (port API fermé ?)`;
+    case 'reseau':       return `Routeur hors réseau : ${nomZone}`;
+    case 'coupure':      return `Connexion interrompue par le routeur : ${nomZone}`;
+    // Message inconnu : on ne le recopie pas (il pourrait contenir l'adresse du routeur).
+    default:             return `Lecture du routeur impossible : ${nomZone}`;
+  }
 }
 
 // Ferme la connexion sans jamais bloquer ni lever d'erreur.
+// Attention (constaté dans le code de node-routeros) : close() ne fait RIEN si la
+// connexion n'est pas encore établie ; le socket resterait ouvert. On le détruit donc
+// de force s'il existe encore (champ interne « connector » de RouterOSAPI).
 async function fermer(conn) {
   if (!conn) return;
   try { await avecDelai(Promise.resolve().then(() => conn.close()), DELAI_FERMETURE_MS, 'FERMETURE'); }
   catch (_) { /* déjà fermée ou injoignable : rien à faire */ }
+  try { if (conn.connector && typeof conn.connector.destroy === 'function') conn.connector.destroy(); }
+  catch (_) { /* déjà détruite */ }
 }
 
 // ─── Lecture d'un routeur ───────────────────────────────────────────────────
 
-async function lireRouteur(s) {
-  const zone = s.id;
-  const nom  = s.name || s.id;
-
-  if (!s.mikrotik_host || !String(s.mikrotik_host).trim()) {
-    return { zone, nom, ok: false, msg: `MikroTik non configuré pour cette zone : ${nom}` };
-  }
-  if (!s.mikrotik_user || !String(s.mikrotik_user).trim()) {
-    return { zone, nom, ok: false, msg: `Identifiant MikroTik non renseigné : ${nom}` };
-  }
-
-  const { host, port } = hoteEtPort(s.mikrotik_host, s.mikrotik_port);
+// Un essai complet : connexion + 3 lectures, limité à delaiMs. Connexion toujours fermée.
+async function unEssai(s, host, port, delaiMs) {
   let conn = null;
-
   try {
     conn = new RouterOSAPI({
       host:      host,
       port:      port,
       user:      String(s.mikrotik_user).trim(),
       password:  s.mikrotik_password || '',
-      timeout:   8,       // node-routeros : en SECONDES
+      // node-routeros : timeout en SECONDES (Connector.ts : socket.setTimeout(timeout * 1000)),
+      // et c'est un délai d'INACTIVITÉ du socket, pas un délai total. On le met 1 s au-dessus
+      // de notre minuteur : c'est notre minuteur (délai total de l'essai) qui décide.
+      timeout:   Math.ceil(delaiMs / 1000) + 1,
       keepalive: false,
     });
     // Évite qu'un événement 'error' non écouté fasse planter la fonction.
@@ -145,7 +175,57 @@ async function lireRouteur(s) {
     })();
     travail.catch(() => {}); // si le délai gagne, l'erreur tardive ne doit pas remonter
 
-    const { hotspot, ppp, ressource } = await avecDelai(travail, DELAI_ROUTEUR_MS, 'DELAI_DEPASSE');
+    return await avecDelai(travail, delaiMs, 'DELAI_DEPASSE');
+  } finally {
+    await fermer(conn);
+  }
+}
+
+// finRouteurs : instant (Date.now()) avant lequel tous les essais doivent être terminés.
+async function lireRouteur(s, finRouteurs) {
+  const debut = Date.now();
+  const zone  = s.id;
+  const nom   = s.name || s.id;
+
+  if (!s.mikrotik_host || !String(s.mikrotik_host).trim()) {
+    return { zone, nom, ok: false, msg: `MikroTik non configuré pour cette zone : ${nom}`, essais: 0, duree_ms: 0 };
+  }
+  if (!s.mikrotik_user || !String(s.mikrotik_user).trim()) {
+    return { zone, nom, ok: false, msg: `Identifiant MikroTik non renseigné : ${nom}`, essais: 0, duree_ms: 0 };
+  }
+
+  const { host, port } = hoteEtPort(s.mikrotik_host, s.mikrotik_port);
+  const plan = [DELAI_ESSAI1_MS, DELAI_ESSAI2_MS];
+  let essais = 0;
+  let donnees = null;
+  let derniereErreur = null;
+
+  for (let i = 0; i < plan.length; i++) {
+    const delai = Math.min(plan[i], finRouteurs - Date.now());
+    if (delai < DELAI_ESSAI_MIN_MS) break;          // plus assez de temps pour un essai utile
+    essais++;
+    try {
+      donnees = await unEssai(s, host, port, delai);
+      break;                                         // réussi
+    } catch (err) {
+      derniereErreur = err;
+      // Journal Vercel : identifiant de zone, n° d'essai et code d'erreur seulement (jamais l'hôte).
+      console.error('[mikrotik-active]', zone, 'essai', essais, (err && (err.code || err.errno)) || 'erreur');
+      if (!nouvelEssaiUtile(err)) break;
+    }
+  }
+
+  const duree_ms = Date.now() - debut;
+
+  if (!donnees) {
+    const e = derniereErreur || Object.assign(new Error('DELAI_DEPASSE'), { code: 'DELAI_DEPASSE' });
+    let msg = messageErreur(e, nom);
+    if (essais > 1) msg += ` (après ${essais} essais)`;
+    return { zone, nom, ok: false, msg, essais, duree_ms };
+  }
+
+  try {
+    const { hotspot, ppp, ressource } = donnees;
 
     // Détail par serveur hotspot
     const liste = Array.isArray(hotspot) ? hotspot : [];
@@ -170,19 +250,19 @@ async function lireRouteur(s) {
       pppoe_total:   Array.isArray(ppp) ? ppp.length : 0,
       uptime:        res0.uptime ? String(res0.uptime) : null,
       cpu:           isNaN(cpu) ? null : cpu,
+      essais,
+      duree_ms,
     };
   } catch (err) {
-    // Journal Vercel : identifiant de zone et code d'erreur seulement (jamais l'hôte).
-    console.error('[mikrotik-active]', zone, (err && (err.code || err.errno)) || 'erreur');
-    return { zone, nom, ok: false, msg: messageErreur(err, nom) };
-  } finally {
-    await fermer(conn);
+    console.error('[mikrotik-active]', zone, 'lecture réponse', (err && err.code) || 'erreur');
+    return { zone, nom, ok: false, msg: `Lecture du routeur impossible : ${nom}`, essais, duree_ms };
   }
 }
 
 // ─── Fonction principale ────────────────────────────────────────────────────
 
 export default async function handler(req, res) {
+  const t0 = Date.now(); // sert à garder le total sous 27 s
   res.setHeader('Cache-Control', 'no-store');
   // Pas d'en-têtes CORS : cette fonction n'est pas appelée depuis le navigateur.
 
@@ -245,12 +325,13 @@ export default async function handler(req, res) {
     return res.status(404).json({ ok: false, msg: 'Succursale introuvable' });
   }
 
-  // 5. Lecture des routeurs en PARALLÈLE
-  const resultats = await Promise.allSettled(succursales.map(s => lireRouteur(s)));
+  // 5. Lecture des routeurs en PARALLÈLE (jusqu'à 2 essais chacun, tous finis avant t0 + 25 s)
+  const finRouteurs = t0 + BUDGET_ROUTEURS_MS;
+  const resultats = await Promise.allSettled(succursales.map(s => lireRouteur(s, finRouteurs)));
   const zones = resultats.map((r, i) => {
     if (r.status === 'fulfilled') return r.value;
     const s = succursales[i];
-    return { zone: s.id, nom: s.name || s.id, ok: false, msg: `Lecture du routeur impossible : ${s.name || s.id}` };
+    return { zone: s.id, nom: s.name || s.id, ok: false, msg: `Lecture du routeur impossible : ${s.name || s.id}`, essais: 0, duree_ms: 0 };
   });
 
   return res.status(200).json({
